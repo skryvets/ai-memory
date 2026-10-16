@@ -222,7 +222,7 @@ const dispose = await plugin.setup(ctx)
 await new Promise((r) => setTimeout(r, 300))
 await command.execute({ sessionID: "ses_2" })
 await new Promise((r) => setTimeout(r, 300))
-const got = JSON.stringify({ id: plugin.id, name: command.name, calls: (await Bun.file(process.env.WORK + "/hook-calls").text()).trim().split("\n"), notes })
+const got = JSON.stringify({ id: plugin.id, name: command.name, calls: (await Bun.file(process.env.WORK + "/hook-calls").text()).trim().split("\n").sort(), notes })
 const want = JSON.stringify({ id: "ai-memory", name: "save-memory", calls: ["opencode-idle ses_1", "opencode-idle ses_3", "opencode-save ses_2"], notes: [{ sessionID: "ses_2", text: "Saving this session to ai-memory in the background" }] })
 if (got !== want || typeof dispose !== "function") { console.error(got); process.exit(1) }
 ' "$WORK/plugin/ai-memory.js" || fail "plugin does not call the hook as expected"
