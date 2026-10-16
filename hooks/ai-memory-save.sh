@@ -4,9 +4,6 @@ set -euo pipefail
 VAULT="${AI_MEMORY_DIR:-$HOME/obsidian/Personal/ai-memory}"
 LOG="${AI_MEMORY_LOG:-$HOME/.claude/ai-memory.log}"
 CLAUDE_BIN="${AI_MEMORY_CLAUDE_BIN:-claude}"
-LOCK="${AI_MEMORY_LOCK:-$HOME/.claude/ai-memory.lock}"
-LOCK_WAIT_SECONDS="${AI_MEMORY_LOCK_WAIT:-900}"
-HOOK_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 MIN_USER_MESSAGES=4
 FALLBACK_MODEL=claude-opus-5-5
 
@@ -21,7 +18,7 @@ if [ "${1:-}" != run ]; then
 fi
 
 input="$2"
-trap 'rm -f "$input" "${condensed:-}" "${tmp_note:-}"; [ -z "${have_lock:-}" ] || rm -rf "$LOCK"' EXIT
+trap 'rm -f "$input" "${condensed:-}" "${tmp_note:-}"' EXIT
 log() { echo "$(date '+%F %T') [$session_id] $*"; }
 
 session_id=$(jq -r '.session_id' "$input")
@@ -59,7 +56,10 @@ body must use exactly these markdown sections, in this order:
 ## Goal
 One or two sentences on what the user wanted.
 ## Decisions
-Bullets formatted "<decision> - <why>". Include decisions the user made or confirmed, and anything rejected along with the reason. Write "None" if there were none.
+One bullet per decision the user made or confirmed, formatted "<decision> - <why>". Under it, indented sub-bullets when they apply:
+  - Replaced: <the earlier choice> - <what made it wrong: the edge case, failure or new fact>. Use this when the session first chose something and then switched, or changed a decision from an earlier session. For an earlier session, add its date and its [[sessions/<note-name>]] link when the transcript names them
+  - Rejected: <an alternative considered> - <why not>
+These sub-bullets are the most important part of the note: they stop a future session from re-making a choice that was already tried and dropped. Keep the edge case concrete. Write "None" if there were no decisions.
 ## Findings
 Only include this section when the session involved research or investigation. Bullets with concrete facts learned, including sources or file paths when given.
 ## Open threads
@@ -68,7 +68,7 @@ Bullets of unfinished work or unanswered questions. Write "None" if there are no
 Rules:
 - Never include secrets, API keys, tokens, passwords, credentials or .env values. Describe them generically if relevant
 - Be specific and concise. Prefer exact names, paths, commands and numbers over vague summaries
-- tags: 2 to 6 lowercase topic tags, hyphenated, no "claude-session" tag'
+- tags: 2 to 6 lowercase topic tags, hyphenated, no "claude-session" tag. Name the topics the session covered (a project, a tool, a technology, a domain) so later sessions on the same topic find this note'
 
 # Summaries must bill the Claude subscription, never the API. -p always uses these credentials
 # when present and they outrank the /login session (https://code.claude.com/docs/en/authentication#authentication-precedence)
@@ -90,7 +90,7 @@ tags=$(jq -r '["claude-session"] + .structured_output.tags | unique | join(", ")
 
 mkdir -p "$VAULT/sessions"
 old_notes=$(grep -lx "session_id: $session_id" "$VAULT"/sessions/*.md 2>/dev/null || true)
-# A resumed session keeps its original file name so [[sessions/...]] links in merged pages stay valid
+# A resumed session keeps its original file name so [[sessions/...]] links from later notes stay valid
 note=$(head -1 <<<"$old_notes")
 if [ -z "$note" ]; then
   slug=$(tr '[:upper:]' '[:lower:]' <<<"$title" | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-60 | sed -E 's/-+$//')
@@ -113,7 +113,6 @@ tags: [$tags]
 $body
 EOF
 
-old_notes=$(grep -lx "session_id: $session_id" "$VAULT"/sessions/*.md 2>/dev/null || true)
 mv "$tmp_note" "$note"
 tmp_note=
 while IFS= read -r old; do
@@ -121,60 +120,3 @@ while IFS= read -r old; do
 done <<<"$old_notes"
 
 log "saved $note"
-
-[ -d "$VAULT/.git" ] || git -C "$VAULT" init -q -b main
-commit() {
-  git -C "$VAULT" add -A
-  git -C "$VAULT" diff --cached --quiet && return 0
-  # Fixed identity marks agent commits apart from the user's, and no signing so a Touch ID or GPG prompt can't hang a background job
-  git -C "$VAULT" -c user.name="ai-memory hook" -c user.email=ai-memory@localhost -c commit.gpgsign=false commit -qm "$1"
-}
-
-waited=0
-until mkdir "$LOCK" 2>/dev/null; do
-  holder=$(cat "$LOCK/pid" 2>/dev/null || true)
-  if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
-    rm -rf "$LOCK"
-    continue
-  fi
-  if [ "$waited" -ge "$LOCK_WAIT_SECONDS" ]; then
-    log "merge lock busy for ${LOCK_WAIT_SECONDS}s, session note kept but not merged"
-    exit 1
-  fi
-  sleep 1
-  waited=$((waited + 1))
-done
-echo $$ >"$LOCK/pid"
-have_lock=1
-
-note_link=$(basename "$note" .md)
-merge_prompt=$(sed -e "s|{{NOTE}}|sessions/$note_link.md|g" -e "s|{{NOTE_LINK}}|$note_link|g" "$HOOK_DIR/merge-prompt.md")
-merge_schema='{"type":"object","required":["changes"],"properties":{"changes":{"type":"array","items":{
-  "type":"object","required":["path","content","summary"],"properties":{
-  "path":{"type":"string"},"content":{"type":"string"},"summary":{"type":"string"}}}}}}'
-
-# The merge agent can only read the vault (cwd, no Bash, reads elsewhere are denied rather than prompted).
-# It proposes whole-file contents and this script does every write, to allowlisted paths only
-merge_out=$(cd "$VAULT" && "${subscription_only[@]}" "$CLAUDE_BIN" -p --safe-mode --no-session-persistence --model "$model" \
-  --tools "Read,Glob,Grep" --permission-prompts none \
-  --output-format json --json-schema "$merge_schema" "$merge_prompt" </dev/null) || true
-
-if ! jq -e '.structured_output.changes | type == "array"' <<<"$merge_out" >/dev/null 2>&1; then
-  log "merge failed, session note kept: $(head -c 500 <<<"$merge_out")"
-  commit "session: $title (merge failed)"
-  exit 1
-fi
-
-allowed='^(index\.md|(projects|topics)/[a-z0-9][a-z0-9-]*/(README|decisions|research|design)\.md|knowledge/[a-z0-9][a-z0-9-]*\.md)$'
-count=$(jq '.structured_output.changes | length' <<<"$merge_out")
-for ((i = 0; i < count; i++)); do
-  path=$(jq -r ".structured_output.changes[$i].path" <<<"$merge_out")
-  if ! grep -Eq "$allowed" <<<"$path"; then
-    log "merge rejected path outside allowlist: $path"
-    continue
-  fi
-  mkdir -p "$VAULT/$(dirname "$path")"
-  jq -r ".structured_output.changes[$i].content" <<<"$merge_out" >"$VAULT/$path"
-  log "merged $path - $(jq -r ".structured_output.changes[$i].summary" <<<"$merge_out")"
-done
-commit "merge: $title"
