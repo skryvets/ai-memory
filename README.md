@@ -11,7 +11,7 @@ See [SPEC.md](SPEC.md) for the design and decisions
 
 ## Install
 
-Requires `jq`, `perl` and `claude`
+Requires `jq`, `perl`, `git` and `claude`
 
 ```sh
 ./install.sh
