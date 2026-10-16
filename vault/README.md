@@ -1,6 +1,6 @@
 # ai-memory
 
-Shared memory for AI agents (Claude Code and others), kept apart from hand-written notes in this vault. Managed by https://github.com/skryvets/ai-memory
+Shared memory for AI agents (Claude Code, OpenCode and others), kept apart from hand-written notes in this vault. Managed by https://github.com/skryvets/ai-memory
 
 ## Layout
 
@@ -11,12 +11,12 @@ Shared memory for AI agents (Claude Code and others), kept apart from hand-writt
 ```
 ---
 date: YYYY-MM-DD
-agent: claude-code
-model: <model id>
+agent: claude-code | opencode
+model: <the session's model, the one that made the decisions>
 project: <working directory>
 session_id: <id, unique per note>
-transcript: <path to the raw transcript, may no longer exist>
-tags: [claude-session, <topics>]
+transcript: <path to the raw transcript, or an opencode session export command, may no longer exist>
+tags: [claude-session | opencode-session, <topics>]
 ---
 # <title>
 
@@ -31,6 +31,6 @@ tags: [claude-session, <topics>]
 
 ## Rules for agents
 
-- Before recommending a design or tool choice, search `sessions/` for earlier decisions on the same topic. Read the Replaced and Rejected lines: they record choices that were already tried and dropped
-- When notes disagree, the newest note is current
+- Before recommending a design or tool choice, search `sessions/` for earlier decisions on the same topic, with the qmd `query` tool (collection `ai-memory`) or grep. Read the Replaced and Rejected lines: they record choices that were already tried and dropped
+- When notes disagree, the newest note is current. Between notes of a similar age, trust the one from the stronger model
 - Never write secrets or credentials here. The vault syncs to other devices

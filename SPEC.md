@@ -46,6 +46,29 @@ That was built (commit `3aca140`) and then removed. It added a second AI call, a
 | 21 | A resumed session keeps its note's original file name | Renaming would break `[[sessions/...]]` links from later notes |
 | 22 | No merge agent, topic pages, index, lock or vault git | Removed, see above. Golden Thread's approach can return if grep over notes stops scaling, at several hundred notes or more |
 
+### Round 3 - OpenCode and search by meaning
+
+OpenCode is where free and local models run. They are less capable, so they most need to find what a stronger model already decided. Grep only matches exact words, and weaker models are worse at guessing the synonyms
+
+| # | Decision | Why |
+| - | - | - |
+| 23 | OpenCode sessions are saved to the same `sessions/` folder in the same format, with `agent: opencode` | One memory for every agent |
+| 24 | An OpenCode session is saved after 10 minutes with no new messages. Coming back later updates the same note | OpenCode has no session-end event, only turn-end events (`session.execution.succeeded/failed/interrupted` in OpenCode 2) |
+| 25 | OpenCode sessions are summarized by `claude-opus-5-5` through the Claude subscription. The note keeps the session's own model in `model:` | The memory free models rely on should be written by a strong model |
+| 26 | Free-model sessions are saved too. When notes disagree, recall prefers the newer note, then the stronger model | Their work still matters, and `model:` shows who decided |
+| 27 | `/save-memory` saves the current session right away in both tools, ignoring the 4-message minimum | Sometimes you want a save without ending the session |
+| 28 | Search by meaning with [qmd](https://github.com/tobi/qmd): local embeddings, keyword search and reranking over the notes | Free models need the most help finding notes, so the grep-catalog step was skipped |
+| 29 | One always-on qmd HTTP server (launchd `ai-memory.qmd`, `localhost:8181/mcp`), registered as an MCP server in Claude Code and OpenCode | Models stay loaded: about 0.5s per search, versus about 25s to start qmd per search |
+| 30 | qmd indexes only `ai-memory/sessions/` | Personal notes stay out of agent searches |
+| 31 | qmd's read-only tools (`query`, `get`, `multi_get`) are pre-allowed in Claude Code | Otherwise every recall asks for permission, and headless sessions can't search at all |
+| 32 | Recall falls back to grep when qmd is unavailable | Memory still works if the server is down |
+
+Rejected:
+- Supermemory - it moves notes out of Obsidian into its own store and needs an API key (hosted) or an LLM provider key (self-hosted)
+- Obsidian Smart Connections - only works while Obsidian is open
+- A qmd stdio server per client - each new session reloads the models
+- `/save-memory` as a skill - OpenCode also loads `~/.claude/skills/`, where `${CLAUDE_SESSION_ID}` isn't filled in. So Claude Code gets `~/.claude/commands/save-memory.md`, and the OpenCode plugin registers its own `/save-memory`, whose handler receives the session ID
+
 ## How it works
 
 1. Claude Code ends a session and runs `~/.claude/hooks/ai-memory-save.sh` with `{session_id, transcript_path, cwd, reason}` on stdin
@@ -59,18 +82,29 @@ That was built (commit `3aca140`) and then removed. It added a second AI call, a
    - Summaries always bill the Claude subscription, never the API. Every credential that [outranks the `/login` session](https://code.claude.com/docs/en/authentication#authentication-precedence) is stripped from the call's environment: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_PROFILE`, `ANTHROPIC_FEDERATION_RULE_ID` and `CLAUDE_CODE_USE_BEDROCK/VERTEX/FOUNDRY`
    - Before summarizing, `claude auth status` runs under that same environment. Anything other than `claude.ai` or `oauth_token` (a `claude setup-token` subscription token), for example an `apiKeyHelper` in settings, makes the worker refuse and log why, so it never falls back to API billing
 5. The worker writes `sessions/YYYY-MM-DD-<slug>.md` atomically. A resumed session reuses its existing file name. If the summarizer fails, the existing note is kept
-6. Every outcome is logged to `~/.claude/ai-memory.log`
+6. The worker runs `qmd update && qmd embed`, so the note is searchable right away
+7. Every outcome is logged to `~/.claude/ai-memory.log`
+
+OpenCode:
+- The plugin `opencode/plugins/ai-memory.js` uses the OpenCode 2 format (default export `{id, setup}`). When a turn ends it starts `ai-memory-save.sh opencode-idle <id>` detached, since `opencode run` shuts its server down right after the reply. The detached worker sleeps 10 minutes, exports the session with `opencode session export <id>`, and exits if it was updated during the wait. Otherwise it condenses user and assistant text, without reasoning or tool output, and continues from step 3
+- `/save-memory` runs `ai-memory-save.sh save <id>` in Claude Code, or `opencode-save <id>` from the plugin's command in OpenCode. Both skip the wait and the minimum message count
+
+Recall:
+- `/recall` lives in `~/.claude/skills/`, which both tools load. It calls qmd's `query` tool with `collections: ["ai-memory"]` and falls back to grep
+- OpenCode reads `~/.claude/CLAUDE.md` because there's no `~/.config/opencode/AGENTS.md`, so the "check `/recall` first" rule applies there too
 
 Docs used:
 - https://code.claude.com/docs/en/hooks#sessionend
 - https://code.claude.com/docs/en/cli-reference
 - https://code.claude.com/docs/en/headless#get-structured-output
-- https://code.claude.com/docs/en/skills
+- https://code.claude.com/docs/en/skills (`${CLAUDE_SESSION_ID}`, inline shell)
+- https://opencode.ai/v2/docs/build/plugins (OpenCode 2 plugin API: setup, `ctx.event.subscribe`, `ctx.command.transform`, `ctx.session.synthetic`), https://opencode.ai/docs/skills/, https://opencode.ai/docs/rules/, https://opencode.ai/docs/mcp-servers/, https://opencode.ai/docs/commands/
+- https://github.com/tobi/qmd
 
 ## Out of scope for now
 
 - SessionStart injection of past decisions
 - Topic pages or an index, if grep over notes stops scaling
-- Writers for other agents
+- Writers for agents other than Claude Code and OpenCode
 - Saving before compaction
 - Chunked summarizing for transcripts over ~8MB of text (currently only the tail is kept)
