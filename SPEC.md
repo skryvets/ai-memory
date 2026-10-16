@@ -35,7 +35,8 @@ Context from a Claude Code session is lost when it ends. Built-in auto-memory is
    - Reads the last assistant model
 4. It runs `claude -p --safe-mode --tools "" --no-session-persistence --model <model> --output-format json --json-schema <schema>` with the condensed text on stdin:
    - `--safe-mode` turns off hooks, which stops this hook from triggering itself, plus CLAUDE.md, plugins and MCP, while keeping the subscription login
-   - `ANTHROPIC_API_KEY` is unset for the call, so `-p` uses the same login as interactive sessions instead of a stale key from the shell profile
+   - Summaries always bill the Claude subscription, never the API. Every credential that [outranks the `/login` session](https://code.claude.com/docs/en/authentication#authentication-precedence) is stripped from the call's environment: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_PROFILE`, `ANTHROPIC_FEDERATION_RULE_ID` and `CLAUDE_CODE_USE_BEDROCK/VERTEX/FOUNDRY`
+   - Before summarizing, `claude auth status` runs under that same environment. Anything other than `claude.ai` or `oauth_token` (a `claude setup-token` subscription token), for example an `apiKeyHelper` in settings, makes the worker refuse and log why, so it never falls back to API billing
 5. The worker writes `sessions/YYYY-MM-DD-<slug>.md` atomically, then removes any older note with the same `session_id`. If the summarizer fails, the existing note is kept
 6. Every outcome is logged to `~/.claude/ai-memory.log`
 

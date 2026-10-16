@@ -67,10 +67,17 @@ Rules:
 - Be specific and concise. Prefer exact names, paths, commands and numbers over vague summaries
 - tags: 2 to 6 lowercase topic tags, hyphenated, no "claude-session" tag'
 
-# -p prefers ANTHROPIC_API_KEY over the subscription login that interactive sessions use,
-# and a stale key in the shell profile makes every summary fail with 401
-# TODO: make this opt-out if a valid API key ever becomes the only auth
-out=$(env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" -p --safe-mode --tools "" --no-session-persistence --model "$model" \
+# Summaries must bill the Claude subscription, never the API. -p always uses these credentials
+# when present and they outrank the /login session (https://code.claude.com/docs/en/authentication#authentication-precedence)
+subscription_only=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL -u ANTHROPIC_PROFILE
+  -u ANTHROPIC_FEDERATION_RULE_ID -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY)
+auth_method=$("${subscription_only[@]}" "$CLAUDE_BIN" auth status 2>/dev/null | jq -r '.authMethod // empty' 2>/dev/null || true)
+case "$auth_method" in
+  claude.ai | oauth_token) ;;
+  *) log "refusing to summarize, auth is '${auth_method:-unknown}' not a Claude subscription, run claude /login"; exit 1 ;;
+esac
+
+out=$("${subscription_only[@]}" "$CLAUDE_BIN" -p --safe-mode --tools "" --no-session-persistence --model "$model" \
   --output-format json --json-schema "$schema" "$prompt" <"$condensed") || true
 
 title=$(jq -r '.structured_output.title // empty' <<<"$out" 2>/dev/null || true)
