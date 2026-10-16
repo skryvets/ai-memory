@@ -9,6 +9,7 @@ OPENCODE_DIR="${OPENCODE_DIR:-$HOME/.config/opencode}"
 LAUNCH_AGENTS="${LAUNCH_AGENTS:-$HOME/Library/LaunchAgents}"
 VAULT="${AI_MEMORY_DIR:-$HOME/obsidian/Personal/ai-memory}"
 CLAUDE_BIN="${AI_MEMORY_CLAUDE_BIN:-claude}"
+OPENCODE_BIN="${AI_MEMORY_OPENCODE_BIN:-opencode}"
 QMD_BIN="${AI_MEMORY_QMD_BIN:-qmd}"
 LAUNCHCTL="${AI_MEMORY_LAUNCHCTL:-launchctl}"
 SETTINGS="$CLAUDE_DIR/settings.json"
@@ -20,7 +21,7 @@ die() { echo "ai-memory install: $*" >&2; exit 1; }
 has() { command -v "$1" >/dev/null; }
 
 [ "$(uname)" = Darwin ] || die "macOS only, the qmd search server runs under launchd"
-has "$CLAUDE_BIN" || die "install Claude Code first (https://code.claude.com/docs/en/setup), then run: claude /login"
+has "$CLAUDE_BIN" || has "$OPENCODE_BIN" || die "install Claude Code (https://code.claude.com/docs/en/setup) or OpenCode (https://opencode.ai) first"
 has brew || { has jq && has node; } || die "install Homebrew first: https://brew.sh"
 has jq || brew install jq
 has node || brew install node
@@ -29,36 +30,55 @@ has node || brew install node
 brew list sqlite >/dev/null 2>&1 || brew install sqlite
 has "$QMD_BIN" || npm install -g @tobilu/qmd
 
-auth_method=$(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "$CLAUDE_BIN" auth status 2>/dev/null | jq -r '.authMethod // empty' 2>/dev/null || true)
-case "$auth_method" in
-  claude.ai | oauth_token) ;;
-  *) echo "warning: Claude Code is not logged in with a Claude subscription (auth: '${auth_method:-none}'). Run claude /login, or no notes will be saved" >&2 ;;
+SUMMARIZER="${AI_MEMORY_SUMMARIZER:-$(has "$CLAUDE_BIN" && echo claude || echo opencode)}"
+SUMMARY_MODEL="${AI_MEMORY_SUMMARY_MODEL:-}"
+case "$SUMMARIZER" in
+  claude)
+    has "$CLAUDE_BIN" || die "AI_MEMORY_SUMMARIZER=claude needs Claude Code"
+    auth_method=$(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "$CLAUDE_BIN" auth status 2>/dev/null | jq -r '.authMethod // empty' 2>/dev/null || true)
+    case "$auth_method" in
+      claude.ai | oauth_token) ;;
+      *) echo "warning: Claude Code is not logged in with a Claude subscription (auth: '${auth_method:-none}'). Run claude /login, or no notes will be saved" >&2 ;;
+    esac ;;
+  opencode)
+    has "$OPENCODE_BIN" || die "AI_MEMORY_SUMMARIZER=opencode needs OpenCode"
+    [ -n "$SUMMARY_MODEL" ] || die "set AI_MEMORY_SUMMARY_MODEL to the OpenCode model that writes summaries (provider/model), pick the strongest from: opencode models" ;;
+  *) die "AI_MEMORY_SUMMARIZER must be claude or opencode" ;;
 esac
 
 mkdir -p "$(dirname "$CONFIG")"
-printf 'AI_MEMORY_DIR="${AI_MEMORY_DIR:-%s}"\n' "$VAULT" >"$CONFIG"
+printf 'AI_MEMORY_DIR="${AI_MEMORY_DIR:-%s}"\nAI_MEMORY_SUMMARIZER="${AI_MEMORY_SUMMARIZER:-%s}"\nAI_MEMORY_SUMMARY_MODEL="${AI_MEMORY_SUMMARY_MODEL:-%s}"\n' \
+  "$VAULT" "$SUMMARIZER" "$SUMMARY_MODEL" >"$CONFIG"
 
-mkdir -p "$VAULT/sessions" "$CLAUDE_DIR/hooks" "$CLAUDE_DIR/skills" "$CLAUDE_DIR/commands"
+mkdir -p "$VAULT/sessions" "$CLAUDE_DIR/hooks" "$CLAUDE_DIR/skills"
 cp "$REPO/vault/README.md" "$VAULT/README.md"
 
 chmod +x "$REPO/hooks/ai-memory-save.sh"
 ln -sfn "$REPO/hooks/ai-memory-save.sh" "$HOOK"
+# OpenCode also loads skills from ~/.claude/skills, so this one copy serves both agents
 ln -sfn "$REPO/skills/recall" "$CLAUDE_DIR/skills/recall"
-ln -sfn "$REPO/claude/commands/save-memory.md" "$CLAUDE_DIR/commands/save-memory.md"
 
-# OpenCode falls back to ~/.claude/CLAUDE.md when it has no AGENTS.md of its own, so both agents get the rule
-grep -qs '/recall' "$CLAUDE_DIR/CLAUDE.md" || printf '\n- Before recommending a design or tool choice, check `/recall` for earlier decisions on it. If the choice was already replaced or rejected, say so and give the reason before going further\n' >>"$CLAUDE_DIR/CLAUDE.md"
+add_rule() {
+  grep -qs '/recall' "$1" || printf '\n- Before recommending a design or tool choice, check `/recall` for earlier decisions on it. If the choice was already replaced or rejected, say so and give the reason before going further\n' >>"$1"
+}
+# OpenCode reads ~/.claude/CLAUDE.md only when it has no AGENTS.md of its own
+if [ -f "$OPENCODE_DIR/AGENTS.md" ]; then add_rule "$OPENCODE_DIR/AGENTS.md"; fi
+if has "$CLAUDE_BIN" || [ ! -f "$OPENCODE_DIR/AGENTS.md" ]; then add_rule "$CLAUDE_DIR/CLAUDE.md"; fi
 
-[ -f "$SETTINGS" ] || echo '{}' >"$SETTINGS"
-[ -f "$SETTINGS.ai-memory.bak" ] || cp "$SETTINGS" "$SETTINGS.ai-memory.bak"
-updated=$(jq --arg cmd "$HOOK" '
-  .hooks.SessionEnd = (
-    [(.hooks.SessionEnd // [])[] | .hooks |= map(select(.command != $cmd)) | select(.hooks | length > 0)]
-    + [{hooks: [{type: "command", command: $cmd}]}]
-  )
-  | .permissions.allow = ((.permissions.allow // []) + ["mcp__qmd__query", "mcp__qmd__get", "mcp__qmd__multi_get"] | unique)
-  ' "$SETTINGS")
-printf '%s\n' "$updated" >"$SETTINGS"
+if has "$CLAUDE_BIN"; then
+  mkdir -p "$CLAUDE_DIR/commands"
+  ln -sfn "$REPO/claude/commands/save-memory.md" "$CLAUDE_DIR/commands/save-memory.md"
+  [ -f "$SETTINGS" ] || echo '{}' >"$SETTINGS"
+  [ -f "$SETTINGS.ai-memory.bak" ] || cp "$SETTINGS" "$SETTINGS.ai-memory.bak"
+  updated=$(jq --arg cmd "$HOOK" '
+    .hooks.SessionEnd = (
+      [(.hooks.SessionEnd // [])[] | .hooks |= map(select(.command != $cmd)) | select(.hooks | length > 0)]
+      + [{hooks: [{type: "command", command: $cmd}]}]
+    )
+    | .permissions.allow = ((.permissions.allow // []) + ["mcp__qmd__query", "mcp__qmd__get", "mcp__qmd__multi_get"] | unique)
+    ' "$SETTINGS")
+  printf '%s\n' "$updated" >"$SETTINGS"
+fi
 
 "$QMD_BIN" collection list 2>/dev/null | grep -q '^ai-memory ' || {
   "$QMD_BIN" collection add "$VAULT/sessions" --name ai-memory >/dev/null
@@ -91,9 +111,11 @@ EOF
 "$LAUNCHCTL" bootout "gui/$(id -u)/$QMD_LABEL" 2>/dev/null || true
 "$LAUNCHCTL" bootstrap "gui/$(id -u)" "$plist"
 
-"$CLAUDE_BIN" mcp get qmd >/dev/null 2>&1 || "$CLAUDE_BIN" mcp add --scope user --transport http qmd "$QMD_URL" >/dev/null
+if has "$CLAUDE_BIN"; then
+  "$CLAUDE_BIN" mcp get qmd >/dev/null 2>&1 || "$CLAUDE_BIN" mcp add --scope user --transport http qmd "$QMD_URL" >/dev/null
+fi
 
-if [ -d "$OPENCODE_DIR" ]; then
+if [ -d "$OPENCODE_DIR" ] || has "$OPENCODE_BIN"; then
   mkdir -p "$OPENCODE_DIR/plugins"
   ln -sfn "$REPO/opencode/plugins/ai-memory.js" "$OPENCODE_DIR/plugins/ai-memory.js"
   config="$OPENCODE_DIR/opencode.jsonc"
@@ -107,7 +129,7 @@ if [ -d "$OPENCODE_DIR" ]; then
   fi
 fi
 
-echo "installed: hook -> $HOOK, skill -> $CLAUDE_DIR/skills/recall, vault -> $VAULT"
-echo "qmd search server -> $QMD_URL (launchd $QMD_LABEL), registered in Claude Code and OpenCode"
-echo "settings backup: $SETTINGS.ai-memory.bak"
+echo "installed: vault -> $VAULT, summaries by $SUMMARIZER${SUMMARY_MODEL:+ ($SUMMARY_MODEL)}, settings in $CONFIG"
+echo "qmd search server -> $QMD_URL (launchd $QMD_LABEL)"
+if has "$CLAUDE_BIN"; then echo "Claude Code: hook, /recall, /save-memory, qmd registered. Settings backup: $SETTINGS.ai-memory.bak"; fi
 if [ -d "$OPENCODE_DIR" ]; then echo "run 'opencode service restart' when no OpenCode session is busy, to load the plugin"; fi

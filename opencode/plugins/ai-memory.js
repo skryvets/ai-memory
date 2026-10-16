@@ -9,8 +9,9 @@ const runHook = (...args) => spawn(HOOK, args, { detached: true, stdio: "ignore"
 export default {
   id: "ai-memory",
   async setup(ctx) {
-    // OpenCode may probe setup() without a context during startup
-    if (!ctx?.event?.subscribe || !ctx?.command?.transform) return
+    // OpenCode may probe setup() without a context during startup.
+    // AI_MEMORY_DISABLE is set by the hook when it uses OpenCode to write a summary
+    if (process.env.AI_MEMORY_DISABLE || !ctx?.event?.subscribe || !ctx?.command?.transform) return
 
     await ctx.command.transform((editor) => {
       editor.add({

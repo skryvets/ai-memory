@@ -10,6 +10,8 @@ OPENCODE_BIN="${AI_MEMORY_OPENCODE_BIN:-opencode}"
 QMD_BIN="${AI_MEMORY_QMD_BIN:-qmd}"
 CLAUDE_PROJECTS="${AI_MEMORY_CLAUDE_PROJECTS:-$HOME/.claude/projects}"
 QUIET_SECONDS="${AI_MEMORY_QUIET_SECONDS:-600}"
+SUMMARIZER="${AI_MEMORY_SUMMARIZER:-claude}"
+SUMMARY_MODEL="${AI_MEMORY_SUMMARY_MODEL:-}"
 MIN_USER_MESSAGES=4
 FALLBACK_MODEL=claude-opus-5-5
 
@@ -33,8 +35,11 @@ esac
 
 agent="$2" mode="$3" session_id="$4" transcript="${5:-}" cwd="${6:-}"
 trap 'rm -f "${export_file:-}" "${condensed:-}" "${tmp_note:-}"' EXIT
-log() { echo "$(date '+%F %T') [$session_id] $*"; }
+log() { echo "$(date '+%F %T') [$session_id] $*" >&2; }
 condensed=$(mktemp -t ai-memory)
+max_chars=8000000
+# ponytail: OpenCode models (Copilot) have ~128k-token windows and no stdin cap, keep the last ~100k tokens
+[ "$SUMMARIZER" != opencode ] || max_chars=400000
 
 if [ "$agent" = opencode ]; then
   if [ "$mode" = idle ]; then
@@ -53,7 +58,7 @@ if [ "$agent" = opencode ]; then
   session_tag=opencode-session
   jq -r '.messages[] | if .type == "user" then "### User\n" + .text + "\n"
     elif .type == "assistant" then (.content[]? | select(.type == "text" and .text != "") | "### Assistant\n" + .text + "\n")
-    else empty end' "$export_file" | tail -c 8000000 >"$condensed"
+    else empty end' "$export_file" | tail -c "$max_chars" >"$condensed"
 else
   if [ -z "$transcript" ]; then
     transcript=$(ls "$CLAUDE_PROJECTS"/*/"$session_id.jsonl" 2>/dev/null | head -1 || true)
@@ -69,7 +74,7 @@ else
   session_tag=claude-session
   jq -r "if $human_message then \"### User\n\" + .message.content + \"\n\"
     elif .type == \"assistant\" then (.message.content[]? | select(.type == \"text\") | \"### Assistant\n\" + .text + \"\n\")
-    else empty end" "$transcript" | tail -c 8000000 >"$condensed"
+    else empty end" "$transcript" | tail -c "$max_chars" >"$condensed"
 fi
 # ponytail: tail keeps the end under the 10MB stdin cap, chunked summarizing if huge sessions lose too much
 
@@ -104,18 +109,41 @@ Rules:
 - Be specific and concise. Prefer exact names, paths, commands and numbers over vague summaries
 - tags: 2 to 6 lowercase topic tags, hyphenated, no "claude-session" or "opencode-session" tag. Name the topics the session covered (a project, a tool, a technology, a domain) so later sessions on the same topic find this note'
 
-# Summaries must bill the Claude subscription, never the API. -p always uses these credentials
-# when present and they outrank the /login session (https://code.claude.com/docs/en/authentication#authentication-precedence)
-subscription_only=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL -u ANTHROPIC_PROFILE
-  -u ANTHROPIC_FEDERATION_RULE_ID -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY)
-auth_method=$("${subscription_only[@]}" "$CLAUDE_BIN" auth status 2>/dev/null | jq -r '.authMethod // empty' 2>/dev/null || true)
-case "$auth_method" in
-  claude.ai | oauth_token) ;;
-  *) log "refusing to summarize, auth is '${auth_method:-unknown}' not a Claude subscription, run claude /login"; exit 1 ;;
-esac
+summarize_with_claude() {
+  # Summaries must bill the Claude subscription, never the API. -p always uses these credentials
+  # when present and they outrank the /login session (https://code.claude.com/docs/en/authentication#authentication-precedence)
+  local subscription_only=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL -u ANTHROPIC_PROFILE
+    -u ANTHROPIC_FEDERATION_RULE_ID -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY)
+  local auth_method
+  auth_method=$("${subscription_only[@]}" "$CLAUDE_BIN" auth status 2>/dev/null | jq -r '.authMethod // empty' 2>/dev/null || true)
+  case "$auth_method" in
+    claude.ai | oauth_token) ;;
+    *) log "refusing to summarize, auth is '${auth_method:-unknown}' not a Claude subscription, run claude /login"; exit 1 ;;
+  esac
+  "${subscription_only[@]}" "$CLAUDE_BIN" -p --safe-mode --tools "" --no-session-persistence --model "${SUMMARY_MODEL:-$summarizer_model}" \
+    --output-format json --json-schema "$schema" "$prompt" <"$condensed" || true
+}
 
-out=$("${subscription_only[@]}" "$CLAUDE_BIN" -p --safe-mode --tools "" --no-session-persistence --model "$summarizer_model" \
-  --output-format json --json-schema "$schema" "$prompt" <"$condensed") || true
+summarize_with_opencode() {
+  [ -n "$SUMMARY_MODEL" ] || { log "AI_MEMORY_SUMMARY_MODEL is not set in $CONFIG"; exit 1; }
+  local events summary_session
+  # AI_MEMORY_DISABLE keeps the plugin in this private server from saving the summarizer's own session
+  events=$(AI_MEMORY_DISABLE=1 "$OPENCODE_BIN" run --standalone --model "$SUMMARY_MODEL" --format json --title "ai-memory summary" \
+    -f "$condensed" "${prompt/The stdin is/The attached file is}
+- title: short descriptive title, under 70 characters
+Reply with only one JSON object with the keys title, tags and body. No code fence, no other text. Do not use any tools" 2>/dev/null) || true
+  summary_session=$(jq -r '.sessionID // empty' <<<"$events" 2>/dev/null | head -1 || true)
+  [ -z "$summary_session" ] || "$OPENCODE_BIN" session delete "$summary_session" >/dev/null 2>&1 || true
+  jq -rs '[.[] | select(.part.type == "text") | .part.text] | join("")' <<<"$events" 2>/dev/null |
+    perl -0ne 'print $1 if /(\{.*\})/s' |
+    jq -c '{structured_output: (.tags |= (map(ascii_downcase | gsub("[^a-z0-9-]+"; "-")) | .[0:6]))}' 2>/dev/null || echo "$events"
+}
+
+case "$SUMMARIZER" in
+  claude) out=$(summarize_with_claude) || exit 1 ;;
+  opencode) out=$(summarize_with_opencode) || exit 1 ;;
+  *) log "unknown AI_MEMORY_SUMMARIZER '$SUMMARIZER', use claude or opencode"; exit 1 ;;
+esac
 
 title=$(jq -r '.structured_output.title // empty' <<<"$out" 2>/dev/null || true)
 [ -n "$title" ] || { log "summarizer returned no structured output: $(head -c 500 <<<"$out")"; exit 1; }

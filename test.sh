@@ -43,7 +43,20 @@ chmod +x "$AI_MEMORY_CLAUDE_BIN"
 
 cat >"$AI_MEMORY_OPENCODE_BIN" <<'EOF'
 #!/usr/bin/env bash
-[ "$1 $2" = "session export" ] && cat "$(dirname "$0")/export-$3.json"
+dir="$(dirname "$0")"
+case "$1 $2" in
+  "session export") cat "$dir/export-$3.json" ;;
+  "session delete") echo "$3" >>"$dir/oc-deleted" ;;
+  run*)
+    printf '%s\n' "$@" >"$dir/oc-run-args"
+    while [ $# -gt 0 ]; do [ "$1" = -f ] && cp "$2" "$dir/oc-attached"; shift; done
+    echo "AI_MEMORY_DISABLE=${AI_MEMORY_DISABLE:-}" >"$dir/oc-run-env"
+    jq -nc '{type: "step_start", sessionID: "ses_summary", part: {type: "step-start"}}'
+    jq -nc --arg t 'Here it is:
+```json
+{"title": "Copilot Summary", "tags": ["Work Laptop", "opencode", "a", "b", "c", "d", "e"], "body": "## Goal\nSummarize"}
+```' '{type: "text", sessionID: "ses_summary", part: {type: "text", text: $t}}' ;;
+esac
 EOF
 printf '#!/usr/bin/env bash\necho "$*" >>"$(dirname "$0")/qmd-calls"\n' >"$AI_MEMORY_QMD_BIN"
 printf '#!/usr/bin/env bash\necho "$*" >>"$(dirname "$0")/launchctl-calls"\n' >"$AI_MEMORY_LAUNCHCTL"
@@ -222,6 +235,9 @@ const ctx = {
   session: { synthetic: async (m) => notes.push(m) },
 }
 await plugin.setup(undefined)
+process.env.AI_MEMORY_DISABLE = "1"
+if (await plugin.setup(ctx)) { console.error("plugin ran with AI_MEMORY_DISABLE"); process.exit(1) }
+delete process.env.AI_MEMORY_DISABLE
 const dispose = await plugin.setup(ctx)
 await new Promise((r) => setTimeout(r, 300))
 await command.execute({ sessionID: "ses_2" })
@@ -231,6 +247,24 @@ const want = JSON.stringify({ id: "ai-memory", name: "save-memory", calls: ["ope
 if (got !== want || typeof dispose !== "function") { console.error(got); process.exit(1) }
 ' "$WORK/plugin/ai-memory.js" || fail "plugin does not call the hook as expected"
 fi
+
+echo "test: OpenCode can write the summary instead of Claude, for machines without a Claude subscription"
+rm -f "$WORK/claude-args"
+FAKE_AUTH=api_key AI_MEMORY_SUMMARIZER=opencode AI_MEMORY_SUMMARY_MODEL=github-copilot/strong-model \
+  "$HOOK" run claude-code auto copilot-1 "$WORK/long.jsonl" /tmp/work >>"$AI_MEMORY_LOG" 2>&1
+note="$SESSIONS/$(date +%F)-copilot-summary.md"
+[ -f "$note" ] || fail "opencode summarizer did not write a note"
+[ ! -f "$WORK/claude-args" ] || fail "claude ran although opencode is the summarizer"
+grep -qx "## Goal" "$note" || fail "opencode summary body missing"
+grep -qx "tags: \[a, b, c, claude-session, d, opencode, work-laptop\]" "$note" || fail "opencode tags not cleaned: $(grep tags "$note")"
+grep -qx -- "--standalone" "$WORK/oc-run-args" && grep -qx "github-copilot/strong-model" "$WORK/oc-run-args" || fail "opencode run flags wrong"
+grep -q "question 4" "$WORK/oc-attached" || fail "transcript not attached"
+grep -qx "AI_MEMORY_DISABLE=1" "$WORK/oc-run-env" || fail "plugin not disabled for the summarizer session"
+grep -qx "ses_summary" "$WORK/oc-deleted" || fail "summarizer session not deleted"
+
+echo "test: OpenCode summarizer needs a model"
+AI_MEMORY_SUMMARIZER=opencode "$HOOK" run claude-code auto nomodel-oc "$WORK/long.jsonl" /tmp >>"$AI_MEMORY_LOG" 2>&1 && fail "should fail without a model"
+grep -q "\[nomodel-oc\] AI_MEMORY_SUMMARY_MODEL is not set" "$AI_MEMORY_LOG" || fail "missing model not logged"
 
 echo "test: install.sh is idempotent and keeps other hooks"
 export CLAUDE_DIR="$WORK/claude" OPENCODE_DIR="$WORK/opencode" LAUNCH_AGENTS="$WORK/agents"
@@ -266,5 +300,17 @@ oc="$OPENCODE_DIR/opencode.jsonc"
 grep -q "collection add $AI_MEMORY_DIR/sessions --name ai-memory" "$WORK/qmd-calls" || fail "qmd collection not created"
 grep -q "<string>mcp</string><string>--http</string>" "$LAUNCH_AGENTS/ai-memory.qmd.plist" || fail "qmd launch agent not written"
 grep -q "^bootstrap gui/" "$WORK/launchctl-calls" || fail "qmd launch agent not started"
+
+echo "test: install works on a machine with OpenCode and no Claude Code"
+export CLAUDE_DIR="$WORK/claude2" AI_MEMORY_CONFIG="$WORK/config2/env"
+rm -f "$WORK/mcp-calls"
+AI_MEMORY_CLAUDE_BIN=no-such-claude "$REPO/install.sh" >/dev/null 2>"$WORK/install-err" && fail "install without a summary model should stop"
+grep -q "set AI_MEMORY_SUMMARY_MODEL" "$WORK/install-err" || fail "install did not explain the missing model"
+AI_MEMORY_CLAUDE_BIN=no-such-claude AI_MEMORY_SUMMARY_MODEL=github-copilot/strong-model "$REPO/install.sh" >/dev/null
+grep -qx 'AI_MEMORY_SUMMARIZER="${AI_MEMORY_SUMMARIZER:-opencode}"' "$AI_MEMORY_CONFIG" || fail "summarizer not saved: $(cat "$AI_MEMORY_CONFIG")"
+grep -qx 'AI_MEMORY_SUMMARY_MODEL="${AI_MEMORY_SUMMARY_MODEL:-github-copilot/strong-model}"' "$AI_MEMORY_CONFIG" || fail "summary model not saved"
+[ ! -e "$CLAUDE_DIR/settings.json" ] && [ ! -e "$WORK/mcp-calls" ] || fail "touched Claude Code settings without Claude Code"
+[ -L "$CLAUDE_DIR/skills/recall" ] && [ -L "$OPENCODE_DIR/plugins/ai-memory.js" ] || fail "recall skill or opencode plugin missing"
+grep -q '/recall' "$CLAUDE_DIR/CLAUDE.md" || fail "recall rule missing for OpenCode"
 
 echo "all tests passed"

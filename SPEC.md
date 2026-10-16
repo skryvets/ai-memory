@@ -79,6 +79,22 @@ Rejected:
 | 36 | The installer adds the "check `/recall` first" rule to `~/.claude/CLAUDE.md` unless it already mentions `/recall` | A new machine gets the full setup, and a CLAUDE.md that already carries the rule (for example from dotfiles) is left alone |
 | 37 | macOS only | The search server runs under launchd. Linux would need a systemd unit instead |
 
+### Round 5 - a machine without a Claude subscription
+
+The work laptop runs OpenCode on a GitHub Copilot key and has no Claude subscription
+
+| # | Decision | Why |
+| - | - | - |
+| 38 | Each machine keeps its own memory, with no sync between them | The user's call |
+| 39 | The summarizer is chosen per machine: `claude` or `opencode`, set with `AI_MEMORY_SUMMARIZER` and `AI_MEMORY_SUMMARY_MODEL` | Work has no Claude subscription. Copilot is available through OpenCode |
+| | Replaced: decision 15 as a rule for every machine, "summaries always bill the Claude subscription" - it can't work where there's no subscription. It still holds when the summarizer is `claude` | |
+| 40 | The OpenCode summarizer runs `opencode run --standalone --model <model> -f <transcript>`, asks for one JSON object, extracts it from the reply and cleans the tags | `opencode run` has no JSON schema option. Attaching a file avoids the argument size limit |
+| 41 | Its transcript is cut to the last 400k characters, about 100k tokens | Copilot models have smaller context windows than Claude Code's |
+| 42 | The hook sets `AI_MEMORY_DISABLE=1` for that private server, which turns off the plugin, then deletes the summary session | Otherwise the summarizer's own session would be saved and would clutter the session list |
+| 43 | Claude Code is optional. Without it, the installer skips its settings, `/save-memory` command and MCP registration, and the rule goes into `~/.claude/CLAUDE.md` (which OpenCode reads) or OpenCode's own `AGENTS.md` | The work laptop may have only OpenCode |
+
+Rejected: an Anthropic or Copilot API call straight from the hook - it would need its own key handling, and `opencode run` already has the user's provider login
+
 ## How it works
 
 1. Claude Code ends a session and runs `~/.claude/hooks/ai-memory-save.sh` with `{session_id, transcript_path, cwd, reason}` on stdin
