@@ -4,6 +4,9 @@ set -euo pipefail
 VAULT="${AI_MEMORY_DIR:-$HOME/obsidian/Personal/ai-memory}"
 LOG="${AI_MEMORY_LOG:-$HOME/.claude/ai-memory.log}"
 CLAUDE_BIN="${AI_MEMORY_CLAUDE_BIN:-claude}"
+LOCK="${AI_MEMORY_LOCK:-$HOME/.claude/ai-memory.lock}"
+LOCK_WAIT_SECONDS="${AI_MEMORY_LOCK_WAIT:-900}"
+HOOK_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 MIN_USER_MESSAGES=4
 FALLBACK_MODEL=claude-opus-5-5
 
@@ -18,7 +21,7 @@ if [ "${1:-}" != run ]; then
 fi
 
 input="$2"
-trap 'rm -f "$input" "${condensed:-}" "${tmp_note:-}"' EXIT
+trap 'rm -f "$input" "${condensed:-}" "${tmp_note:-}"; [ -z "${have_lock:-}" ] || rm -rf "$LOCK"' EXIT
 log() { echo "$(date '+%F %T') [$session_id] $*"; }
 
 session_id=$(jq -r '.session_id' "$input")
@@ -85,9 +88,14 @@ title=$(jq -r '.structured_output.title // empty' <<<"$out" 2>/dev/null || true)
 body=$(jq -r '.structured_output.body' <<<"$out")
 tags=$(jq -r '["claude-session"] + .structured_output.tags | unique | join(", ")' <<<"$out")
 
-slug=$(tr '[:upper:]' '[:lower:]' <<<"$title" | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-60 | sed -E 's/-+$//')
 mkdir -p "$VAULT/sessions"
-note="$VAULT/sessions/$(date +%F)-$slug.md"
+old_notes=$(grep -lx "session_id: $session_id" "$VAULT"/sessions/*.md 2>/dev/null || true)
+# A resumed session keeps its original file name so [[sessions/...]] links in merged pages stay valid
+note=$(head -1 <<<"$old_notes")
+if [ -z "$note" ]; then
+  slug=$(tr '[:upper:]' '[:lower:]' <<<"$title" | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-60 | sed -E 's/-+$//')
+  note="$VAULT/sessions/$(date +%F)-$slug.md"
+fi
 
 tmp_note=$(mktemp "$VAULT/sessions/.tmp.XXXXXX")
 cat >"$tmp_note" <<EOF
@@ -113,3 +121,60 @@ while IFS= read -r old; do
 done <<<"$old_notes"
 
 log "saved $note"
+
+[ -d "$VAULT/.git" ] || git -C "$VAULT" init -q -b main
+commit() {
+  git -C "$VAULT" add -A
+  git -C "$VAULT" diff --cached --quiet && return 0
+  # Fixed identity marks agent commits apart from the user's, and no signing so a Touch ID or GPG prompt can't hang a background job
+  git -C "$VAULT" -c user.name="ai-memory hook" -c user.email=ai-memory@localhost -c commit.gpgsign=false commit -qm "$1"
+}
+
+waited=0
+until mkdir "$LOCK" 2>/dev/null; do
+  holder=$(cat "$LOCK/pid" 2>/dev/null || true)
+  if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+    rm -rf "$LOCK"
+    continue
+  fi
+  if [ "$waited" -ge "$LOCK_WAIT_SECONDS" ]; then
+    log "merge lock busy for ${LOCK_WAIT_SECONDS}s, session note kept but not merged"
+    exit 1
+  fi
+  sleep 1
+  waited=$((waited + 1))
+done
+echo $$ >"$LOCK/pid"
+have_lock=1
+
+note_link=$(basename "$note" .md)
+merge_prompt=$(sed -e "s|{{NOTE}}|sessions/$note_link.md|g" -e "s|{{NOTE_LINK}}|$note_link|g" "$HOOK_DIR/merge-prompt.md")
+merge_schema='{"type":"object","required":["changes"],"properties":{"changes":{"type":"array","items":{
+  "type":"object","required":["path","content","summary"],"properties":{
+  "path":{"type":"string"},"content":{"type":"string"},"summary":{"type":"string"}}}}}}'
+
+# The merge agent can only read the vault (cwd, no Bash, reads elsewhere are denied rather than prompted).
+# It proposes whole-file contents and this script does every write, to allowlisted paths only
+merge_out=$(cd "$VAULT" && "${subscription_only[@]}" "$CLAUDE_BIN" -p --safe-mode --no-session-persistence --model "$model" \
+  --tools "Read,Glob,Grep" --permission-prompts none \
+  --output-format json --json-schema "$merge_schema" "$merge_prompt" </dev/null) || true
+
+if ! jq -e '.structured_output.changes | type == "array"' <<<"$merge_out" >/dev/null 2>&1; then
+  log "merge failed, session note kept: $(head -c 500 <<<"$merge_out")"
+  commit "session: $title (merge failed)"
+  exit 1
+fi
+
+allowed='^(index\.md|(projects|topics)/[a-z0-9][a-z0-9-]*/(README|decisions|research|design)\.md|knowledge/[a-z0-9][a-z0-9-]*\.md)$'
+count=$(jq '.structured_output.changes | length' <<<"$merge_out")
+for ((i = 0; i < count; i++)); do
+  path=$(jq -r ".structured_output.changes[$i].path" <<<"$merge_out")
+  if ! grep -Eq "$allowed" <<<"$path"; then
+    log "merge rejected path outside allowlist: $path"
+    continue
+  fi
+  mkdir -p "$VAULT/$(dirname "$path")"
+  jq -r ".structured_output.changes[$i].content" <<<"$merge_out" >"$VAULT/$path"
+  log "merged $path - $(jq -r ".structured_output.changes[$i].summary" <<<"$merge_out")"
+done
+commit "merge: $title"
