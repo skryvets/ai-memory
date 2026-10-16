@@ -95,6 +95,18 @@ The work laptop runs OpenCode on a GitHub Copilot key and has no Claude subscrip
 
 Rejected: an Anthropic or Copilot API call straight from the hook - it would need its own key handling, and `opencode run` already has the user's provider login
 
+### Round 6 - a setup wizard
+
+| # | Decision | Why |
+| - | - | - |
+| 44 | `./setup.sh` asks for the memory folder, the agents, who writes summaries, the OpenCode provider and model, and the login, then runs `install.sh` with the answers | A person can install without knowing the environment variables. `install.sh` stays the non-interactive path for agents and re-installs |
+| 45 | `AI_MEMORY_AGENTS` picks which agents get wired up. The default is every agent that's installed | Someone may have both installed but use memory in only one |
+| 46 | API keys stay in each agent's own login: `claude auth login --claudeai` and `opencode auth login`. ai-memory never stores a key | One place to change or revoke a key, and nothing secret in the repo or in `~/.config/ai-memory/env` |
+| 47 | When the provider's key only lives in an environment variable, the wizard offers to save it in OpenCode's store | Summaries run in the background, where a variable from a shell profile may be missing |
+| 48 | The saved settings use `${VAR-saved}`, so setting a variable to empty clears it | Switching from the OpenCode summarizer to Claude has to clear the old model, or Claude would be asked to run a Copilot model name |
+
+Rejected: asking for an API key in the wizard and storing it in ai-memory's config - a second copy of the secret, in plain text. Rejected: an API key for the Claude summarizer - the user requires the subscription
+
 ## How it works
 
 1. Claude Code ends a session and runs `~/.claude/hooks/ai-memory-save.sh` with `{session_id, transcript_path, cwd, reason}` on stdin

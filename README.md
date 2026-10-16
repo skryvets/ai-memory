@@ -33,11 +33,21 @@ Requirements:
 ```sh
 git clone https://github.com/skryvets/ai-memory.git ~/Code/ai-memory
 cd ~/Code/ai-memory
-./install.sh
+./setup.sh
 ```
 
-Settings, passed as environment variables to `install.sh`. They're saved to `~/.config/ai-memory/env`, and later re-installs reuse them:
+`setup.sh` asks a few questions, shows your answers, and installs only after you confirm:
+1. **Memory folder** - where the notes go
+2. **Agents** - Claude Code, OpenCode or both, from what's installed
+3. **Who writes summaries** - Claude Code with your Claude subscription, or OpenCode with a model you pick
+4. **Login** - for Claude, it checks you're logged in with a subscription and opens `claude auth login` if not. For OpenCode, you pick a provider you're already connected to, or connect a new one through `opencode auth login`, which asks for the API key or opens the provider's login (GitHub Copilot uses a browser login). If the key only lives in an environment variable, it offers to save it in OpenCode's store, because summaries run in the background where that variable may be missing
+5. **Model** - for OpenCode, type part of a name (`opus`, `gpt`, `deepseek`) and pick from the matches
+
+ai-memory never stores an API key. Keys stay in Claude Code's and OpenCode's own logins
+
+To skip the questions, run `./install.sh` with settings as environment variables. They're saved to `~/.config/ai-memory/env`, and later re-installs reuse them:
 - `AI_MEMORY_DIR` - the vault's `ai-memory` folder. Default `~/obsidian/Personal/ai-memory`
+- `AI_MEMORY_AGENTS` - `claude`, `opencode` or `"claude opencode"`. Default: every one that's installed
 - `AI_MEMORY_SUMMARIZER` - `claude` (Claude Code with a Claude subscription) or `opencode` (`opencode run` with any provider). Default `claude` when Claude Code is installed, otherwise `opencode`
 - `AI_MEMORY_SUMMARY_MODEL` - the model that writes summaries. Required for `opencode`, as `provider/model` from `opencode models`. For `claude`, the default is the session's own model, falling back to `claude-opus-5-5`
 
@@ -56,13 +66,13 @@ The installer:
 - Adds a "check `/recall` before a design or tool choice" rule to `~/.claude/CLAUDE.md`, and to `~/.config/opencode/AGENTS.md` if that exists, unless the file already mentions `/recall`
 - Indexes the notes with qmd and runs the qmd search server at `localhost:8181` as the launchd agent `ai-memory.qmd`
 - Registers that server in Claude Code (user scope, read-only tools pre-allowed) and in OpenCode's config
-- Links the OpenCode plugin (save on quiet, `/save-memory`) when OpenCode is installed
+- With OpenCode: links the plugin (save on quiet, `/save-memory`)
 
 It's safe to re-run. The first search downloads qmd's models, about 2GB, into `~/.cache/qmd/models/`
 
 ### Instructions for an AI agent doing the install
 
-Run these steps in order and stop to report if one fails:
+A person can run `./setup.sh`. An agent can't answer its questions, so it runs these steps in order and stops to report if one fails:
 
 1. Check `uname` is `Darwin`. If not, stop: only macOS is supported
 2. Check `brew --version` works. If not, stop and ask the user to install [Homebrew](https://brew.sh)

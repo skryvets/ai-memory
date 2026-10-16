@@ -22,6 +22,13 @@ has() { command -v "$1" >/dev/null; }
 
 [ "$(uname)" = Darwin ] || die "macOS only, the qmd search server runs under launchd"
 has "$CLAUDE_BIN" || has "$OPENCODE_BIN" || die "install Claude Code (https://code.claude.com/docs/en/setup) or OpenCode (https://opencode.ai) first"
+detected=""
+if has "$CLAUDE_BIN"; then detected=claude; fi
+if has "$OPENCODE_BIN"; then detected="${detected:+$detected }opencode"; fi
+AGENTS="${AI_MEMORY_AGENTS:-$detected}"
+uses() { [[ " $AGENTS " == *" $1 "* ]]; }
+if uses claude; then has "$CLAUDE_BIN" || die "AI_MEMORY_AGENTS includes claude but Claude Code isn't installed"; fi
+if uses opencode; then has "$OPENCODE_BIN" || die "AI_MEMORY_AGENTS includes opencode but OpenCode isn't installed"; fi
 has brew || { has jq && has node; } || die "install Homebrew first: https://brew.sh"
 has jq || brew install jq
 has node || brew install node
@@ -47,8 +54,9 @@ case "$SUMMARIZER" in
 esac
 
 mkdir -p "$(dirname "$CONFIG")"
-printf 'AI_MEMORY_DIR="${AI_MEMORY_DIR:-%s}"\nAI_MEMORY_SUMMARIZER="${AI_MEMORY_SUMMARIZER:-%s}"\nAI_MEMORY_SUMMARY_MODEL="${AI_MEMORY_SUMMARY_MODEL:-%s}"\n' \
-  "$VAULT" "$SUMMARIZER" "$SUMMARY_MODEL" >"$CONFIG"
+# ${VAR-saved}, not ${VAR:-saved}, so setting a variable to empty clears a saved value, like a model left over from another summarizer
+printf 'AI_MEMORY_DIR="${AI_MEMORY_DIR-%s}"\nAI_MEMORY_AGENTS="${AI_MEMORY_AGENTS-%s}"\nAI_MEMORY_SUMMARIZER="${AI_MEMORY_SUMMARIZER-%s}"\nAI_MEMORY_SUMMARY_MODEL="${AI_MEMORY_SUMMARY_MODEL-%s}"\n' \
+  "$VAULT" "$AGENTS" "$SUMMARIZER" "$SUMMARY_MODEL" >"$CONFIG"
 
 mkdir -p "$VAULT/sessions" "$CLAUDE_DIR/hooks" "$CLAUDE_DIR/skills"
 cp "$REPO/vault/README.md" "$VAULT/README.md"
@@ -63,9 +71,9 @@ add_rule() {
 }
 # OpenCode reads ~/.claude/CLAUDE.md only when it has no AGENTS.md of its own
 if [ -f "$OPENCODE_DIR/AGENTS.md" ]; then add_rule "$OPENCODE_DIR/AGENTS.md"; fi
-if has "$CLAUDE_BIN" || [ ! -f "$OPENCODE_DIR/AGENTS.md" ]; then add_rule "$CLAUDE_DIR/CLAUDE.md"; fi
+if uses claude || [ ! -f "$OPENCODE_DIR/AGENTS.md" ]; then add_rule "$CLAUDE_DIR/CLAUDE.md"; fi
 
-if has "$CLAUDE_BIN"; then
+if uses claude; then
   mkdir -p "$CLAUDE_DIR/commands"
   ln -sfn "$REPO/claude/commands/save-memory.md" "$CLAUDE_DIR/commands/save-memory.md"
   [ -f "$SETTINGS" ] || echo '{}' >"$SETTINGS"
@@ -111,11 +119,11 @@ EOF
 "$LAUNCHCTL" bootout "gui/$(id -u)/$QMD_LABEL" 2>/dev/null || true
 "$LAUNCHCTL" bootstrap "gui/$(id -u)" "$plist"
 
-if has "$CLAUDE_BIN"; then
+if uses claude; then
   "$CLAUDE_BIN" mcp get qmd >/dev/null 2>&1 || "$CLAUDE_BIN" mcp add --scope user --transport http qmd "$QMD_URL" >/dev/null
 fi
 
-if [ -d "$OPENCODE_DIR" ] || has "$OPENCODE_BIN"; then
+if uses opencode; then
   mkdir -p "$OPENCODE_DIR/plugins"
   ln -sfn "$REPO/opencode/plugins/ai-memory.js" "$OPENCODE_DIR/plugins/ai-memory.js"
   config="$OPENCODE_DIR/opencode.jsonc"
@@ -129,7 +137,7 @@ if [ -d "$OPENCODE_DIR" ] || has "$OPENCODE_BIN"; then
   fi
 fi
 
-echo "installed: vault -> $VAULT, summaries by $SUMMARIZER${SUMMARY_MODEL:+ ($SUMMARY_MODEL)}, settings in $CONFIG"
+echo "installed for $AGENTS: vault -> $VAULT, summaries by $SUMMARIZER${SUMMARY_MODEL:+ ($SUMMARY_MODEL)}, settings in $CONFIG"
 echo "qmd search server -> $QMD_URL (launchd $QMD_LABEL)"
-if has "$CLAUDE_BIN"; then echo "Claude Code: hook, /recall, /save-memory, qmd registered. Settings backup: $SETTINGS.ai-memory.bak"; fi
-if [ -d "$OPENCODE_DIR" ]; then echo "run 'opencode service restart' when no OpenCode session is busy, to load the plugin"; fi
+if uses claude; then echo "Claude Code: hook, /recall, /save-memory, qmd registered. Settings backup: $SETTINGS.ai-memory.bak"; fi
+if uses opencode; then echo "run 'opencode service restart' when no OpenCode session is busy, to load the plugin"; fi

@@ -26,9 +26,12 @@ if [ "$1" = mcp ]; then
 fi
 if [ "$1 $2" = "auth status" ]; then
   env | grep -E '^(ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL|PROFILE|FEDERATION_RULE_ID)|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))=' >"$dir/auth-env" || true
-  jq -n --arg m "${FAKE_AUTH-claude.ai}" '{loggedIn: true, authMethod: $m}'
+  auth="${FAKE_AUTH-claude.ai}"
+  [ ! -f "$dir/logged-in" ] || auth=claude.ai
+  jq -n --arg m "$auth" '{loggedIn: true, authMethod: $m}'
   exit 0
 fi
+[ "$1 $2" != "auth login" ] || { echo "$*" >"$dir/logged-in"; exit 0; }
 printf '%s\n' "$@" >"$dir/claude-args"
 env | grep -E '^(ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL|PROFILE|FEDERATION_RULE_ID)|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))=' >"$dir/summarize-env" || true
 cat >"$dir/claude-stdin"
@@ -47,6 +50,9 @@ dir="$(dirname "$0")"
 case "$1 $2" in
   "session export") cat "$dir/export-$3.json" ;;
   "session delete") echo "$3" >>"$dir/oc-deleted" ;;
+  "models ") printf '%s\n' github-copilot/claude-opus-5-5 github-copilot/gpt-5 openrouter/deepseek ;;
+  "auth list") echo '[{"id": "github-copilot", "connections": [{"type": "env", "name": "GITHUB_TOKEN"}]}]' ;;
+  "auth login") echo "$*" >>"$dir/oc-login" ;;
   run*)
     printf '%s\n' "$@" >"$dir/oc-run-args"
     while [ $# -gt 0 ]; do [ "$1" = -f ] && cp "$2" "$dir/oc-attached"; shift; done
@@ -285,7 +291,7 @@ jq -e '.permissions.allow | index("Bash(ls *)")' "$s" >/dev/null || fail "existi
 [ -f "$AI_MEMORY_DIR/README.md" ] || fail "vault README not copied"
 [ -L "$CLAUDE_DIR/commands/save-memory.md" ] || fail "claude save-memory command not linked"
 [ "$(grep -c '/recall' "$CLAUDE_DIR/CLAUDE.md")" = 1 ] || fail "recall rule not added to CLAUDE.md exactly once"
-grep -qx "AI_MEMORY_DIR=\"\\\${AI_MEMORY_DIR:-$AI_MEMORY_DIR}\"" "$AI_MEMORY_CONFIG" || fail "vault path not saved to config: $(cat "$AI_MEMORY_CONFIG")"
+grep -qx "AI_MEMORY_DIR=\"\\\${AI_MEMORY_DIR-$AI_MEMORY_DIR}\"" "$AI_MEMORY_CONFIG" || fail "vault path not saved to config: $(cat "$AI_MEMORY_CONFIG")"
 
 echo "test: hook reads the vault path from the config"
 mkdir -p "$WORK/other-vault"
@@ -307,10 +313,33 @@ rm -f "$WORK/mcp-calls"
 AI_MEMORY_CLAUDE_BIN=no-such-claude "$REPO/install.sh" >/dev/null 2>"$WORK/install-err" && fail "install without a summary model should stop"
 grep -q "set AI_MEMORY_SUMMARY_MODEL" "$WORK/install-err" || fail "install did not explain the missing model"
 AI_MEMORY_CLAUDE_BIN=no-such-claude AI_MEMORY_SUMMARY_MODEL=github-copilot/strong-model "$REPO/install.sh" >/dev/null
-grep -qx 'AI_MEMORY_SUMMARIZER="${AI_MEMORY_SUMMARIZER:-opencode}"' "$AI_MEMORY_CONFIG" || fail "summarizer not saved: $(cat "$AI_MEMORY_CONFIG")"
-grep -qx 'AI_MEMORY_SUMMARY_MODEL="${AI_MEMORY_SUMMARY_MODEL:-github-copilot/strong-model}"' "$AI_MEMORY_CONFIG" || fail "summary model not saved"
+grep -qx 'AI_MEMORY_SUMMARIZER="${AI_MEMORY_SUMMARIZER-opencode}"' "$AI_MEMORY_CONFIG" || fail "summarizer not saved: $(cat "$AI_MEMORY_CONFIG")"
+grep -qx 'AI_MEMORY_SUMMARY_MODEL="${AI_MEMORY_SUMMARY_MODEL-github-copilot/strong-model}"' "$AI_MEMORY_CONFIG" || fail "summary model not saved"
 [ ! -e "$CLAUDE_DIR/settings.json" ] && [ ! -e "$WORK/mcp-calls" ] || fail "touched Claude Code settings without Claude Code"
 [ -L "$CLAUDE_DIR/skills/recall" ] && [ -L "$OPENCODE_DIR/plugins/ai-memory.js" ] || fail "recall skill or opencode plugin missing"
 grep -q '/recall' "$CLAUDE_DIR/CLAUDE.md" || fail "recall rule missing for OpenCode"
+
+echo "test: setup wizard installs OpenCode summaries and saves an env-only key"
+export CLAUDE_DIR="$WORK/claude3" OPENCODE_DIR="$WORK/opencode3" AI_MEMORY_CONFIG="$WORK/config3/env"
+printf '%s\n' "$WORK/wiz-vault" 1 2 1 1 opus 1 1 | "$REPO/setup.sh" >/dev/null 2>"$WORK/setup-err" || { cat "$WORK/setup-err" >&2; fail "setup wizard failed"; }
+grep -qx 'AI_MEMORY_DIR="${AI_MEMORY_DIR-'"$WORK"'/wiz-vault}"' "$AI_MEMORY_CONFIG" || fail "wizard folder not saved: $(cat "$AI_MEMORY_CONFIG")"
+grep -qx 'AI_MEMORY_AGENTS="${AI_MEMORY_AGENTS-claude opencode}"' "$AI_MEMORY_CONFIG" || fail "wizard agents not saved"
+grep -qx 'AI_MEMORY_SUMMARY_MODEL="${AI_MEMORY_SUMMARY_MODEL-github-copilot/claude-opus-5-5}"' "$AI_MEMORY_CONFIG" || fail "wizard model not saved"
+grep -qx "auth login github-copilot" "$WORK/oc-login" || fail "wizard did not offer to store the env-only key"
+[ -L "$OPENCODE_DIR/plugins/ai-memory.js" ] && [ -f "$CLAUDE_DIR/settings.json" ] || fail "wizard did not set up both agents"
+
+echo "test: setup wizard logs in to Claude, clears the old model and skips OpenCode"
+export OPENCODE_DIR="$WORK/opencode4"
+(unset AI_MEMORY_DIR; printf '%s\n' "" 2 1 1 | FAKE_AUTH=apiKey "$REPO/setup.sh" >/dev/null 2>"$WORK/setup-err") || { cat "$WORK/setup-err" >&2; fail "claude wizard failed"; }
+grep -q "auth login --claudeai" "$WORK/logged-in" || fail "wizard did not open the Claude subscription login"
+grep -qx 'AI_MEMORY_DIR="${AI_MEMORY_DIR-'"$WORK"'/wiz-vault}"' "$AI_MEMORY_CONFIG" || fail "Enter did not keep the saved folder"
+grep -qx 'AI_MEMORY_SUMMARIZER="${AI_MEMORY_SUMMARIZER-claude}"' "$AI_MEMORY_CONFIG" || fail "claude summarizer not saved"
+grep -qx 'AI_MEMORY_SUMMARY_MODEL="${AI_MEMORY_SUMMARY_MODEL-}"' "$AI_MEMORY_CONFIG" || fail "old OpenCode model not cleared"
+[ ! -e "$OPENCODE_DIR/plugins/ai-memory.js" ] || fail "wizard set up OpenCode when only Claude Code was chosen"
+
+echo "test: setup wizard changes nothing when cancelled"
+cp "$AI_MEMORY_CONFIG" "$WORK/config-before"
+printf '%s\n' "" 2 1 2 | "$REPO/setup.sh" >/dev/null 2>&1 && fail "cancelled wizard should exit non-zero"
+cmp -s "$AI_MEMORY_CONFIG" "$WORK/config-before" || fail "cancelled wizard changed the config"
 
 echo "all tests passed"
