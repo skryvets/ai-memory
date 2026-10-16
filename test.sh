@@ -7,6 +7,7 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 export AI_MEMORY_DIR="$WORK/vault"
+export AI_MEMORY_CONFIG="$WORK/config/env"
 export AI_MEMORY_LOG="$WORK/hook.log"
 export AI_MEMORY_CLAUDE_BIN="$WORK/fake-claude"
 export AI_MEMORY_OPENCODE_BIN="$WORK/fake-opencode"
@@ -197,6 +198,9 @@ FAKE_TITLE="Quiet Session" "$HOOK" run opencode idle oc-quiet >>"$AI_MEMORY_LOG"
 [ -f "$SESSIONS/$(date +%F)-quiet-session.md" ] || fail "quiet opencode session not saved"
 unset AI_MEMORY_QUIET_SECONDS
 
+if ! command -v bun >/dev/null; then
+  echo "skip: OpenCode plugin test needs bun"
+else
 echo "test: OpenCode plugin saves when a turn ends and on /save-memory"
 mkdir -p "$WORK/plugin"
 sed "s|\${process.env.HOME}/.claude/hooks/ai-memory-save.sh|$WORK/fake-hook|" "$REPO/opencode/plugins/ai-memory.js" >"$WORK/plugin/ai-memory.js"
@@ -226,6 +230,7 @@ const got = JSON.stringify({ id: plugin.id, name: command.name, calls: (await Bu
 const want = JSON.stringify({ id: "ai-memory", name: "save-memory", calls: ["opencode-idle ses_1", "opencode-idle ses_3", "opencode-save ses_2"], notes: [{ sessionID: "ses_2", text: "Saving this session to ai-memory in the background" }] })
 if (got !== want || typeof dispose !== "function") { console.error(got); process.exit(1) }
 ' "$WORK/plugin/ai-memory.js" || fail "plugin does not call the hook as expected"
+fi
 
 echo "test: install.sh is idempotent and keeps other hooks"
 export CLAUDE_DIR="$WORK/claude" OPENCODE_DIR="$WORK/opencode" LAUNCH_AGENTS="$WORK/agents"
@@ -245,6 +250,14 @@ jq -e '.permissions.allow | index("Bash(ls *)")' "$s" >/dev/null || fail "existi
 [ -L "$CLAUDE_DIR/skills/recall" ] || fail "skill not linked"
 [ -f "$AI_MEMORY_DIR/README.md" ] || fail "vault README not copied"
 [ -L "$CLAUDE_DIR/commands/save-memory.md" ] || fail "claude save-memory command not linked"
+[ "$(grep -c '/recall' "$CLAUDE_DIR/CLAUDE.md")" = 1 ] || fail "recall rule not added to CLAUDE.md exactly once"
+grep -qx "AI_MEMORY_DIR=\"\\\${AI_MEMORY_DIR:-$AI_MEMORY_DIR}\"" "$AI_MEMORY_CONFIG" || fail "vault path not saved to config: $(cat "$AI_MEMORY_CONFIG")"
+
+echo "test: hook reads the vault path from the config"
+mkdir -p "$WORK/other-vault"
+printf 'AI_MEMORY_DIR="${AI_MEMORY_DIR:-%s}"\n' "$WORK/other-vault" >"$WORK/other-config"
+(unset AI_MEMORY_DIR; AI_MEMORY_CONFIG="$WORK/other-config" FAKE_TITLE="Configured Vault" "$HOOK" run claude-code auto cfg-1 "$WORK/long.jsonl" /tmp >>"$AI_MEMORY_LOG" 2>&1)
+[ -f "$WORK/other-vault/sessions/$(date +%F)-configured-vault.md" ] || fail "hook ignored the configured vault"
 [ -L "$OPENCODE_DIR/plugins/ai-memory.js" ] || fail "opencode plugin not linked"
 oc="$OPENCODE_DIR/opencode.jsonc"
 [ "$(jq -r '.mcp.qmd.url' "$oc")" = http://localhost:8181/mcp ] || fail "qmd not registered in opencode"

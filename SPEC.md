@@ -69,6 +69,16 @@ Rejected:
 - A qmd stdio server per client - each new session reloads the models
 - `/save-memory` as a skill - OpenCode also loads `~/.claude/skills/`, where `${CLAUDE_SESSION_ID}` isn't filled in. So Claude Code gets `~/.claude/commands/save-memory.md`, and the OpenCode plugin registers its own `/save-memory`, whose handler receives the session ID
 
+### Round 4 - public repo, install on another laptop
+
+| # | Decision | Why |
+| - | - | - |
+| 33 | The repo is public on GitHub | Install on a work laptop with a clone and one command |
+| 34 | `install.sh` installs missing dependencies itself (`jq`, `node`, `sqlite` through Homebrew, `qmd` through npm) and warns if Claude Code isn't on a subscription login | Drop in, install, done. An agent can run it end to end |
+| 35 | The vault path is configurable with `AI_MEMORY_DIR` at install time, saved to `~/.config/ai-memory/env` and read by the hook | The other laptop's vault may live elsewhere. Hooks don't inherit shell variables, so the path has to be on disk |
+| 36 | The installer adds the "check `/recall` first" rule to `~/.claude/CLAUDE.md` unless it already mentions `/recall` | A new machine gets the full setup, and a CLAUDE.md that already carries the rule (for example from dotfiles) is left alone |
+| 37 | macOS only | The search server runs under launchd. Linux would need a systemd unit instead |
+
 ## How it works
 
 1. Claude Code ends a session and runs `~/.claude/hooks/ai-memory-save.sh` with `{session_id, transcript_path, cwd, reason}` on stdin

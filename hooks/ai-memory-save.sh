@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+CONFIG="${AI_MEMORY_CONFIG:-$HOME/.config/ai-memory/env}"
+[ ! -f "$CONFIG" ] || . "$CONFIG"
 VAULT="${AI_MEMORY_DIR:-$HOME/obsidian/Personal/ai-memory}"
 LOG="${AI_MEMORY_LOG:-$HOME/.claude/ai-memory.log}"
 CLAUDE_BIN="${AI_MEMORY_CLAUDE_BIN:-claude}"

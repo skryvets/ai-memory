@@ -2,6 +2,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
+CONFIG="${AI_MEMORY_CONFIG:-$HOME/.config/ai-memory/env}"
+[ ! -f "$CONFIG" ] || . "$CONFIG"
 CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
 OPENCODE_DIR="${OPENCODE_DIR:-$HOME/.config/opencode}"
 LAUNCH_AGENTS="${LAUNCH_AGENTS:-$HOME/Library/LaunchAgents}"
@@ -14,9 +16,27 @@ HOOK="$CLAUDE_DIR/hooks/ai-memory-save.sh"
 QMD_URL=http://localhost:8181/mcp
 QMD_LABEL=ai-memory.qmd
 
-for bin in jq perl "$CLAUDE_BIN" "$QMD_BIN"; do
-  command -v "$bin" >/dev/null || { echo "missing dependency: $bin (qmd: npm install -g @tobilu/qmd)" >&2; exit 1; }
-done
+die() { echo "ai-memory install: $*" >&2; exit 1; }
+has() { command -v "$1" >/dev/null; }
+
+[ "$(uname)" = Darwin ] || die "macOS only, the qmd search server runs under launchd"
+has "$CLAUDE_BIN" || die "install Claude Code first (https://code.claude.com/docs/en/setup), then run: claude /login"
+has brew || { has jq && has node; } || die "install Homebrew first: https://brew.sh"
+has jq || brew install jq
+has node || brew install node
+[ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ] || die "qmd needs Node.js 22 or newer, run: brew upgrade node"
+# qmd needs Homebrew's SQLite on macOS for its vector extension
+brew list sqlite >/dev/null 2>&1 || brew install sqlite
+has "$QMD_BIN" || npm install -g @tobilu/qmd
+
+auth_method=$(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "$CLAUDE_BIN" auth status 2>/dev/null | jq -r '.authMethod // empty' 2>/dev/null || true)
+case "$auth_method" in
+  claude.ai | oauth_token) ;;
+  *) echo "warning: Claude Code is not logged in with a Claude subscription (auth: '${auth_method:-none}'). Run claude /login, or no notes will be saved" >&2 ;;
+esac
+
+mkdir -p "$(dirname "$CONFIG")"
+printf 'AI_MEMORY_DIR="${AI_MEMORY_DIR:-%s}"\n' "$VAULT" >"$CONFIG"
 
 mkdir -p "$VAULT/sessions" "$CLAUDE_DIR/hooks" "$CLAUDE_DIR/skills" "$CLAUDE_DIR/commands"
 cp "$REPO/vault/README.md" "$VAULT/README.md"
@@ -25,6 +45,9 @@ chmod +x "$REPO/hooks/ai-memory-save.sh"
 ln -sfn "$REPO/hooks/ai-memory-save.sh" "$HOOK"
 ln -sfn "$REPO/skills/recall" "$CLAUDE_DIR/skills/recall"
 ln -sfn "$REPO/claude/commands/save-memory.md" "$CLAUDE_DIR/commands/save-memory.md"
+
+# OpenCode falls back to ~/.claude/CLAUDE.md when it has no AGENTS.md of its own, so both agents get the rule
+grep -qs '/recall' "$CLAUDE_DIR/CLAUDE.md" || printf '\n- Before recommending a design or tool choice, check `/recall` for earlier decisions on it. If the choice was already replaced or rejected, say so and give the reason before going further\n' >>"$CLAUDE_DIR/CLAUDE.md"
 
 [ -f "$SETTINGS" ] || echo '{}' >"$SETTINGS"
 [ -f "$SETTINGS.ai-memory.bak" ] || cp "$SETTINGS" "$SETTINGS.ai-memory.bak"
