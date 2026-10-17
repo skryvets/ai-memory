@@ -325,6 +325,7 @@ AI_MEMORY_AGENTS=opencode AI_MEMORY_OPENCODE_BIN=no-such-opencode "$REPO/install
 grep -qx "mcp remove qmd --scope user" "$WORK/mcp-calls" || fail "qmd not removed from claude code"
 [ -L "$OPENCODE_DIR/plugins/ai-memory.js" ] || fail "opencode with only a config folder was not set up"
 [ "$(saved AI_MEMORY_AGENTS)" = opencode ] || fail "explicit agent choice not saved"
+grep -q '/recall' "$CLAUDE_DIR/CLAUDE.md" || fail "recall rule removed from CLAUDE.md though OpenCode still reads it"
 
 echo "test: unknown agent names stop the install"
 AI_MEMORY_AGENTS=claude,opencode "$REPO/install.sh" >/dev/null 2>"$WORK/install-err" && fail "install accepted claude,opencode"
@@ -382,6 +383,22 @@ grep -q "auth login --claudeai" "$WORK/logged-in" || fail "wizard did not open t
 [ ! -e "$OPENCODE_DIR/plugins/ai-memory.js" ] || fail "OpenCode plugin left behind when only Claude Code was chosen"
 [ "$(jq -r '.mcp.qmd // "gone"' "$OPENCODE_DIR/opencode.json")" = gone ] || fail "qmd left in the OpenCode config"
 ! grep -q '/recall' "$OPENCODE_DIR/AGENTS.md" || fail "recall rule added for OpenCode when only Claude Code was chosen"
+
+echo "test: unwiring OpenCode removes only the recall rule from its AGENTS.md"
+printf '# My rules\n- keep this\n' >"$OPENCODE_DIR/AGENTS.md"
+cp "$OPENCODE_DIR/AGENTS.md" "$WORK/agents-before"
+AI_MEMORY_AGENTS="claude opencode" "$REPO/install.sh" >/dev/null
+[ "$(grep -c '/recall' "$OPENCODE_DIR/AGENTS.md")" = 1 ] || fail "recall rule not added to OpenCode AGENTS.md"
+AI_MEMORY_AGENTS=claude "$REPO/install.sh" >/dev/null
+cmp -s "$OPENCODE_DIR/AGENTS.md" "$WORK/agents-before" || fail "OpenCode AGENTS.md not restored: $(cat "$OPENCODE_DIR/AGENTS.md")"
+grep -q '/recall' "$CLAUDE_DIR/CLAUDE.md" || fail "recall rule removed from CLAUDE.md though Claude Code still uses it"
+
+echo "test: unwiring Claude Code removes the recall rule OpenCode no longer reads from CLAUDE.md"
+printf '# Mine\n' >"$WORK/claude-md-before"
+rule=$(grep '/recall' "$CLAUDE_DIR/CLAUDE.md")
+printf '%s\n\n%s\n' "$(cat "$WORK/claude-md-before")" "$rule" >"$CLAUDE_DIR/CLAUDE.md"
+AI_MEMORY_AGENTS=opencode "$REPO/install.sh" >/dev/null
+cmp -s "$CLAUDE_DIR/CLAUDE.md" "$WORK/claude-md-before" || fail "CLAUDE.md not restored: $(cat "$CLAUDE_DIR/CLAUDE.md")"
 
 echo "test: setup wizard changes nothing when cancelled"
 cp "$AI_MEMORY_CONFIG" "$WORK/config-before"

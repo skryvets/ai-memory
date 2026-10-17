@@ -78,12 +78,17 @@ ln -sfn "$REPO/hooks/ai-memory-save.sh" "$HOOK"
 # OpenCode also loads skills from ~/.claude/skills, so this one copy serves both agents
 ln -sfn "$REPO/skills/recall" "$CLAUDE_DIR/skills/recall"
 
+RULE='- Before recommending a design or tool choice, check `/recall` for earlier decisions on it. If the choice was already replaced or rejected, say so and give the reason before going further'
 add_rule() {
-  grep -qs '/recall' "$1" || printf '\n- Before recommending a design or tool choice, check `/recall` for earlier decisions on it. If the choice was already replaced or rejected, say so and give the reason before going further\n' >>"$1"
+  grep -qs '/recall' "$1" || printf '\n%s\n' "$RULE" >>"$1"
+}
+remove_rule() {
+  [ -f "$1" ] || return 0
+  RULE="$RULE" perl -0777 -pi -e 's/\n?^\Q$ENV{RULE}\E\n//mg' "$1"
 }
 # OpenCode reads ~/.claude/CLAUDE.md only when it has no AGENTS.md of its own
-if uses opencode && [ -f "$OPENCODE_DIR/AGENTS.md" ]; then add_rule "$OPENCODE_DIR/AGENTS.md"; fi
-if uses claude || [ ! -f "$OPENCODE_DIR/AGENTS.md" ]; then add_rule "$CLAUDE_DIR/CLAUDE.md"; fi
+if uses opencode && [ -f "$OPENCODE_DIR/AGENTS.md" ]; then add_rule "$OPENCODE_DIR/AGENTS.md"; else remove_rule "$OPENCODE_DIR/AGENTS.md"; fi
+if uses claude || { uses opencode && [ ! -f "$OPENCODE_DIR/AGENTS.md" ]; }; then add_rule "$CLAUDE_DIR/CLAUDE.md"; else remove_rule "$CLAUDE_DIR/CLAUDE.md"; fi
 
 unhook='.hooks.SessionEnd = [(.hooks.SessionEnd // [])[] | .hooks |= map(select(.command != $cmd)) | select(.hooks | length > 0)]'
 if uses claude; then

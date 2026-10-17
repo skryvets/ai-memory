@@ -67,7 +67,7 @@ The installer:
 - Indexes the notes with qmd and runs the qmd search server at `localhost:8181` as the launchd agent `ai-memory.qmd`
 - Registers that server in Claude Code (user scope, read-only tools pre-allowed) and in OpenCode's config
 - With OpenCode: links the plugin (save on quiet, `/save-memory`)
-- For an agent left out of `AI_MEMORY_AGENTS`: removes what an earlier install added, the hook and `/save-memory` for Claude Code, the plugin for OpenCode, and the qmd server entry in both. The `/recall` rule stays in your instructions file
+- For an agent left out of `AI_MEMORY_AGENTS`: removes what an earlier install added, the hook and `/save-memory` for Claude Code, the plugin for OpenCode, the qmd server entry in both, and the `/recall` rule from an instructions file no selected agent reads
 
 It's safe to re-run. The first search downloads qmd's models, about 2GB, into `~/.cache/qmd/models/`
 
