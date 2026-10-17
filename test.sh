@@ -21,8 +21,12 @@ cat >"$AI_MEMORY_CLAUDE_BIN" <<'EOF'
 dir="$(dirname "$0")"
 if [ "$1" = mcp ]; then
   echo "$*" >>"$dir/mcp-calls"
-  [ "$2" = get ] && { grep -q "mcp add" "$dir/mcp-calls"; exit; }
-  exit 0
+  case "$2" in
+    get) [ -f "$dir/mcp-qmd" ] && echo "  URL: http://localhost:8181/mcp" ;;
+    add) touch "$dir/mcp-qmd" ;;
+    remove) rm -f "$dir/mcp-qmd" ;;
+  esac
+  exit
 fi
 if [ "$1 $2" = "auth status" ]; then
   env | grep -E '^(ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL|PROFILE|FEDERATION_RULE_ID)|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))=' >"$dir/auth-env" || true
@@ -50,7 +54,7 @@ dir="$(dirname "$0")"
 case "$1 $2" in
   "session export") cat "$dir/export-$3.json" ;;
   "session delete") echo "$3" >>"$dir/oc-deleted" ;;
-  "models ") printf '%s\n' github-copilot/claude-opus-5-5 github-copilot/gpt-5 openrouter/deepseek ;;
+  "models ") echo models >>"$dir/oc-models-calls"; printf '%s\n' github-copilot/claude-opus-5-5 github-copilot/claude-opus-5-5-fast github-copilot/gpt-5 my.llm/alpha myxllm/beta openrouter/deepseek ;;
   "auth list") echo '[{"id": "github-copilot", "connections": [{"type": "env", "name": "GITHUB_TOKEN"}]}]' ;;
   "auth login") echo "$*" >>"$dir/oc-login" ;;
   run*)
@@ -69,6 +73,10 @@ printf '#!/usr/bin/env bash\necho "$*" >>"$(dirname "$0")/launchctl-calls"\n' >"
 chmod +x "$AI_MEMORY_OPENCODE_BIN" "$AI_MEMORY_QMD_BIN" "$AI_MEMORY_LAUNCHCTL"
 
 fail() { echo "FAIL: $*" >&2; cat "$AI_MEMORY_LOG" >&2 2>/dev/null || true; exit 1; }
+
+saved() {
+  (unset AI_MEMORY_DIR AI_MEMORY_AGENTS AI_MEMORY_SUMMARIZER AI_MEMORY_SUMMARY_MODEL; . "$AI_MEMORY_CONFIG"; printf '%s' "${!1}")
+}
 
 make_transcript() {
   local path="$1" n="$2"
@@ -291,7 +299,8 @@ jq -e '.permissions.allow | index("Bash(ls *)")' "$s" >/dev/null || fail "existi
 [ -f "$AI_MEMORY_DIR/README.md" ] || fail "vault README not copied"
 [ -L "$CLAUDE_DIR/commands/save-memory.md" ] || fail "claude save-memory command not linked"
 [ "$(grep -c '/recall' "$CLAUDE_DIR/CLAUDE.md")" = 1 ] || fail "recall rule not added to CLAUDE.md exactly once"
-grep -qx "AI_MEMORY_DIR=\"\\\${AI_MEMORY_DIR-$AI_MEMORY_DIR}\"" "$AI_MEMORY_CONFIG" || fail "vault path not saved to config: $(cat "$AI_MEMORY_CONFIG")"
+[ "$(saved AI_MEMORY_DIR)" = "$AI_MEMORY_DIR" ] || fail "vault path not saved to config: $(cat "$AI_MEMORY_CONFIG")"
+[ -z "$(saved AI_MEMORY_AGENTS)" ] || fail "detected agents saved as a choice, agents installed later would be ignored"
 
 echo "test: hook reads the vault path from the config"
 mkdir -p "$WORK/other-vault"
@@ -307,35 +316,89 @@ grep -q "collection add $AI_MEMORY_DIR/sessions --name ai-memory" "$WORK/qmd-cal
 grep -q "<string>mcp</string><string>--http</string>" "$LAUNCH_AGENTS/ai-memory.qmd.plist" || fail "qmd launch agent not written"
 grep -q "^bootstrap gui/" "$WORK/launchctl-calls" || fail "qmd launch agent not started"
 
+echo "test: dropping Claude Code unwires it, OpenCode is found by its folder without a binary on PATH"
+rm -f "$OPENCODE_DIR/plugins/ai-memory.js"
+AI_MEMORY_AGENTS=opencode AI_MEMORY_OPENCODE_BIN=no-such-opencode "$REPO/install.sh" >/dev/null
+[ "$(jq '[.hooks.SessionEnd[].hooks[] | select(.command | endswith("ai-memory-save.sh"))] | length' "$s")" = 0 ] || fail "claude hook left behind"
+[ "$(jq '[.hooks.SessionEnd[].hooks[] | select(.command == "other.sh")] | length' "$s")" = 1 ] || fail "unwiring removed another hook"
+[ ! -e "$CLAUDE_DIR/commands/save-memory.md" ] || fail "claude save-memory command left behind"
+grep -qx "mcp remove qmd --scope user" "$WORK/mcp-calls" || fail "qmd not removed from claude code"
+[ -L "$OPENCODE_DIR/plugins/ai-memory.js" ] || fail "opencode with only a config folder was not set up"
+[ "$(saved AI_MEMORY_AGENTS)" = opencode ] || fail "explicit agent choice not saved"
+grep -q '/recall' "$CLAUDE_DIR/CLAUDE.md" || fail "recall rule removed from CLAUDE.md though OpenCode still reads it"
+
+echo "test: unknown agent names stop the install"
+AI_MEMORY_AGENTS=claude,opencode "$REPO/install.sh" >/dev/null 2>"$WORK/install-err" && fail "install accepted claude,opencode"
+grep -q "AI_MEMORY_AGENTS must be claude, opencode" "$WORK/install-err" || fail "bad agent name not explained"
+
 echo "test: install works on a machine with OpenCode and no Claude Code"
 export CLAUDE_DIR="$WORK/claude2" AI_MEMORY_CONFIG="$WORK/config2/env"
 rm -f "$WORK/mcp-calls"
 AI_MEMORY_CLAUDE_BIN=no-such-claude "$REPO/install.sh" >/dev/null 2>"$WORK/install-err" && fail "install without a summary model should stop"
 grep -q "set AI_MEMORY_SUMMARY_MODEL" "$WORK/install-err" || fail "install did not explain the missing model"
 AI_MEMORY_CLAUDE_BIN=no-such-claude AI_MEMORY_SUMMARY_MODEL=github-copilot/strong-model "$REPO/install.sh" >/dev/null
-grep -qx 'AI_MEMORY_SUMMARIZER="${AI_MEMORY_SUMMARIZER-opencode}"' "$AI_MEMORY_CONFIG" || fail "summarizer not saved: $(cat "$AI_MEMORY_CONFIG")"
-grep -qx 'AI_MEMORY_SUMMARY_MODEL="${AI_MEMORY_SUMMARY_MODEL-github-copilot/strong-model}"' "$AI_MEMORY_CONFIG" || fail "summary model not saved"
+[ "$(saved AI_MEMORY_SUMMARIZER)" = opencode ] || fail "summarizer not saved: $(cat "$AI_MEMORY_CONFIG")"
+[ "$(saved AI_MEMORY_SUMMARY_MODEL)" = github-copilot/strong-model ] || fail "summary model not saved"
 [ ! -e "$CLAUDE_DIR/settings.json" ] && [ ! -e "$WORK/mcp-calls" ] || fail "touched Claude Code settings without Claude Code"
 [ -L "$CLAUDE_DIR/skills/recall" ] && [ -L "$OPENCODE_DIR/plugins/ai-memory.js" ] || fail "recall skill or opencode plugin missing"
 grep -q '/recall' "$CLAUDE_DIR/CLAUDE.md" || fail "recall rule missing for OpenCode"
 
+echo "test: an agent installed later is set up on the next run"
+"$REPO/install.sh" >/dev/null
+[ -f "$CLAUDE_DIR/settings.json" ] || fail "Claude Code installed later was not set up"
+
+echo "test: a saved agent that was uninstalled is skipped, not fatal"
+AI_MEMORY_AGENTS="claude opencode" AI_MEMORY_CLAUDE_BIN=no-such-claude "$REPO/install.sh" >/dev/null 2>"$WORK/install-err" || fail "install died on an uninstalled saved agent"
+grep -q "skipping claude" "$WORK/install-err" || fail "skipped agent not reported"
+
 echo "test: setup wizard installs OpenCode summaries and saves an env-only key"
 export CLAUDE_DIR="$WORK/claude3" OPENCODE_DIR="$WORK/opencode3" AI_MEMORY_CONFIG="$WORK/config3/env"
-printf '%s\n' "$WORK/wiz-vault" 1 2 1 1 opus 1 1 | "$REPO/setup.sh" >/dev/null 2>"$WORK/setup-err" || { cat "$WORK/setup-err" >&2; fail "setup wizard failed"; }
-grep -qx 'AI_MEMORY_DIR="${AI_MEMORY_DIR-'"$WORK"'/wiz-vault}"' "$AI_MEMORY_CONFIG" || fail "wizard folder not saved: $(cat "$AI_MEMORY_CONFIG")"
-grep -qx 'AI_MEMORY_AGENTS="${AI_MEMORY_AGENTS-claude opencode}"' "$AI_MEMORY_CONFIG" || fail "wizard agents not saved"
-grep -qx 'AI_MEMORY_SUMMARY_MODEL="${AI_MEMORY_SUMMARY_MODEL-github-copilot/claude-opus-5-5}"' "$AI_MEMORY_CONFIG" || fail "wizard model not saved"
+wiz_vault="$WORK/wiz \"vault\" \$HOME}\`id\`"
+rm -f "$WORK/oc-models-calls"
+printf '%s\n' "$wiz_vault" 1 2 1 1 opus 1 1 | "$REPO/setup.sh" >/dev/null 2>"$WORK/setup-err" || { cat "$WORK/setup-err" >&2; fail "setup wizard failed"; }
+[ "$(saved AI_MEMORY_DIR)" = "$wiz_vault" ] || fail "wizard folder with special characters not saved as typed: $(cat "$AI_MEMORY_CONFIG")"
+[ "$(saved AI_MEMORY_AGENTS)" = "claude opencode" ] || fail "wizard agents not saved"
+[ "$(saved AI_MEMORY_SUMMARY_MODEL)" = github-copilot/claude-opus-5-5 ] || fail "wizard model not saved"
 grep -qx "auth login github-copilot" "$WORK/oc-login" || fail "wizard did not offer to store the env-only key"
 [ -L "$OPENCODE_DIR/plugins/ai-memory.js" ] && [ -f "$CLAUDE_DIR/settings.json" ] || fail "wizard did not set up both agents"
+[ "$(wc -l <"$WORK/oc-models-calls" | tr -d ' ')" = 1 ] || fail "wizard listed OpenCode models more than once"
 
-echo "test: setup wizard logs in to Claude, clears the old model and skips OpenCode"
-export OPENCODE_DIR="$WORK/opencode4"
+echo "test: pressing Enter through the wizard keeps every saved answer"
+cp "$AI_MEMORY_CONFIG" "$WORK/config-before"
+(unset AI_MEMORY_DIR; printf '\n%.0s' 1 2 3 4 5 6 7 8 | "$REPO/setup.sh" >/dev/null 2>"$WORK/setup-err") || { cat "$WORK/setup-err" >&2; fail "Enter-only wizard failed"; }
+cmp -s "$AI_MEMORY_CONFIG" "$WORK/config-before" || fail "Enter changed saved answers: $(diff "$WORK/config-before" "$AI_MEMORY_CONFIG")"
+
+echo "test: wizard lists only the chosen provider's models, even with a dot in its name"
+(unset AI_MEMORY_DIR; printf '%s\n' "" 1 2 2 "" 1 2 | "$REPO/setup.sh" >/dev/null 2>"$WORK/setup-err") && fail "cancelled wizard should exit non-zero"
+grep -q "1) my.llm/alpha" "$WORK/setup-err" || fail "my.llm model not listed: $(cat "$WORK/setup-err")"
+! grep -q "myxllm/beta" "$WORK/setup-err" || fail "my.llm matched another provider's model"
+
+echo "test: setup wizard logs in to Claude, clears the old model and unwires OpenCode"
+: >"$OPENCODE_DIR/AGENTS.md"
 (unset AI_MEMORY_DIR; printf '%s\n' "" 2 1 1 | FAKE_AUTH=apiKey "$REPO/setup.sh" >/dev/null 2>"$WORK/setup-err") || { cat "$WORK/setup-err" >&2; fail "claude wizard failed"; }
 grep -q "auth login --claudeai" "$WORK/logged-in" || fail "wizard did not open the Claude subscription login"
-grep -qx 'AI_MEMORY_DIR="${AI_MEMORY_DIR-'"$WORK"'/wiz-vault}"' "$AI_MEMORY_CONFIG" || fail "Enter did not keep the saved folder"
-grep -qx 'AI_MEMORY_SUMMARIZER="${AI_MEMORY_SUMMARIZER-claude}"' "$AI_MEMORY_CONFIG" || fail "claude summarizer not saved"
-grep -qx 'AI_MEMORY_SUMMARY_MODEL="${AI_MEMORY_SUMMARY_MODEL-}"' "$AI_MEMORY_CONFIG" || fail "old OpenCode model not cleared"
-[ ! -e "$OPENCODE_DIR/plugins/ai-memory.js" ] || fail "wizard set up OpenCode when only Claude Code was chosen"
+[ "$(saved AI_MEMORY_DIR)" = "$wiz_vault" ] || fail "Enter did not keep the saved folder"
+[ "$(saved AI_MEMORY_SUMMARIZER)" = claude ] || fail "claude summarizer not saved"
+[ -z "$(saved AI_MEMORY_SUMMARY_MODEL)" ] || fail "old OpenCode model not cleared"
+[ ! -e "$OPENCODE_DIR/plugins/ai-memory.js" ] || fail "OpenCode plugin left behind when only Claude Code was chosen"
+[ "$(jq -r '.mcp.qmd // "gone"' "$OPENCODE_DIR/opencode.json")" = gone ] || fail "qmd left in the OpenCode config"
+! grep -q '/recall' "$OPENCODE_DIR/AGENTS.md" || fail "recall rule added for OpenCode when only Claude Code was chosen"
+
+echo "test: unwiring OpenCode removes only the recall rule from its AGENTS.md"
+printf '# My rules\n- keep this\n' >"$OPENCODE_DIR/AGENTS.md"
+cp "$OPENCODE_DIR/AGENTS.md" "$WORK/agents-before"
+AI_MEMORY_AGENTS="claude opencode" "$REPO/install.sh" >/dev/null
+[ "$(grep -c '/recall' "$OPENCODE_DIR/AGENTS.md")" = 1 ] || fail "recall rule not added to OpenCode AGENTS.md"
+AI_MEMORY_AGENTS=claude "$REPO/install.sh" >/dev/null
+cmp -s "$OPENCODE_DIR/AGENTS.md" "$WORK/agents-before" || fail "OpenCode AGENTS.md not restored: $(cat "$OPENCODE_DIR/AGENTS.md")"
+grep -q '/recall' "$CLAUDE_DIR/CLAUDE.md" || fail "recall rule removed from CLAUDE.md though Claude Code still uses it"
+
+echo "test: unwiring Claude Code removes the recall rule OpenCode no longer reads from CLAUDE.md"
+printf '# Mine\n' >"$WORK/claude-md-before"
+rule=$(grep '/recall' "$CLAUDE_DIR/CLAUDE.md")
+printf '%s\n\n%s\n' "$(cat "$WORK/claude-md-before")" "$rule" >"$CLAUDE_DIR/CLAUDE.md"
+AI_MEMORY_AGENTS=opencode "$REPO/install.sh" >/dev/null
+cmp -s "$CLAUDE_DIR/CLAUDE.md" "$WORK/claude-md-before" || fail "CLAUDE.md not restored: $(cat "$CLAUDE_DIR/CLAUDE.md")"
 
 echo "test: setup wizard changes nothing when cancelled"
 cp "$AI_MEMORY_CONFIG" "$WORK/config-before"

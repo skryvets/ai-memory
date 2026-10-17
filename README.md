@@ -36,7 +36,7 @@ cd ~/Code/ai-memory
 ./setup.sh
 ```
 
-`setup.sh` asks a few questions, shows your answers, and installs only after you confirm:
+`setup.sh` asks a few questions, shows your answers, and installs only after you confirm. On a re-run, Enter keeps each saved answer:
 1. **Memory folder** - where the notes go
 2. **Agents** - Claude Code, OpenCode or both, from what's installed
 3. **Who writes summaries** - Claude Code with your Claude subscription, or OpenCode with a model you pick
@@ -47,7 +47,7 @@ ai-memory never stores an API key. Keys stay in Claude Code's and OpenCode's own
 
 To skip the questions, run `./install.sh` with settings as environment variables. They're saved to `~/.config/ai-memory/env`, and later re-installs reuse them:
 - `AI_MEMORY_DIR` - the vault's `ai-memory` folder. Default `~/obsidian/Personal/ai-memory`
-- `AI_MEMORY_AGENTS` - `claude`, `opencode` or `"claude opencode"`. Default: every one that's installed
+- `AI_MEMORY_AGENTS` - `claude`, `opencode` or `"claude opencode"`. Default: every one that's installed, checked again on each run. OpenCode counts as installed when `opencode` is on PATH or `~/.config/opencode` exists. A saved agent that was uninstalled is skipped with a warning
 - `AI_MEMORY_SUMMARIZER` - `claude` (Claude Code with a Claude subscription) or `opencode` (`opencode run` with any provider). Default `claude` when Claude Code is installed, otherwise `opencode`
 - `AI_MEMORY_SUMMARY_MODEL` - the model that writes summaries. Required for `opencode`, as `provider/model` from `opencode models`. For `claude`, the default is the session's own model, falling back to `claude-opus-5-5`
 
@@ -63,10 +63,11 @@ The installer:
 - Creates `<vault>/sessions/` and copies `vault/README.md`, the note format and rules for every agent, into the vault
 - Symlinks the hook and the `recall` skill into `~/.claude`. OpenCode loads skills from there too
 - With Claude Code: links `/save-memory`, and registers the SessionEnd hook in `~/.claude/settings.json` without touching other hooks, after backing it up to `settings.json.ai-memory.bak`
-- Adds a "check `/recall` before a design or tool choice" rule to `~/.claude/CLAUDE.md`, and to `~/.config/opencode/AGENTS.md` if that exists, unless the file already mentions `/recall`
+- Adds a "check `/recall` before a design or tool choice" rule to `~/.claude/CLAUDE.md`, and with OpenCode to `~/.config/opencode/AGENTS.md` if that exists, unless the file already mentions `/recall`
 - Indexes the notes with qmd and runs the qmd search server at `localhost:8181` as the launchd agent `ai-memory.qmd`
 - Registers that server in Claude Code (user scope, read-only tools pre-allowed) and in OpenCode's config
 - With OpenCode: links the plugin (save on quiet, `/save-memory`)
+- For an agent left out of `AI_MEMORY_AGENTS`: removes what an earlier install added, the hook and `/save-memory` for Claude Code, the plugin for OpenCode, the qmd server entry in both, and the `/recall` rule from an instructions file no selected agent reads
 
 It's safe to re-run. The first search downloads qmd's models, about 2GB, into `~/.cache/qmd/models/`
 

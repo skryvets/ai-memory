@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+. "$(dirname "$(readlink -f "$0")")/../lib.sh"
 CONFIG="${AI_MEMORY_CONFIG:-$HOME/.config/ai-memory/env}"
 [ ! -f "$CONFIG" ] || . "$CONFIG"
 VAULT="${AI_MEMORY_DIR:-$HOME/obsidian/Personal/ai-memory}"
@@ -110,17 +111,10 @@ Rules:
 - tags: 2 to 6 lowercase topic tags, hyphenated, no "claude-session" or "opencode-session" tag. Name the topics the session covered (a project, a tool, a technology, a domain) so later sessions on the same topic find this note'
 
 summarize_with_claude() {
-  # Summaries must bill the Claude subscription, never the API. -p always uses these credentials
-  # when present and they outrank the /login session (https://code.claude.com/docs/en/authentication#authentication-precedence)
-  local subscription_only=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL -u ANTHROPIC_PROFILE
-    -u ANTHROPIC_FEDERATION_RULE_ID -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY)
   local auth_method
-  auth_method=$("${subscription_only[@]}" "$CLAUDE_BIN" auth status 2>/dev/null | jq -r '.authMethod // empty' 2>/dev/null || true)
-  case "$auth_method" in
-    claude.ai | oauth_token) ;;
-    *) log "refusing to summarize, auth is '${auth_method:-unknown}' not a Claude subscription, run claude /login"; exit 1 ;;
-  esac
-  "${subscription_only[@]}" "$CLAUDE_BIN" -p --safe-mode --tools "" --no-session-persistence --model "${SUMMARY_MODEL:-$summarizer_model}" \
+  auth_method=$(claude_auth_method)
+  is_subscription "$auth_method" || { log "refusing to summarize, auth is '${auth_method:-unknown}' not a Claude subscription, run claude /login"; exit 1; }
+  "${SUBSCRIPTION_ONLY[@]}" "$CLAUDE_BIN" -p --safe-mode --tools "" --no-session-persistence --model "${SUMMARY_MODEL:-$summarizer_model}" \
     --output-format json --json-schema "$schema" "$prompt" <"$condensed" || true
 }
 
