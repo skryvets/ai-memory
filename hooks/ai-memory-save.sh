@@ -179,5 +179,6 @@ log "saved $note"
 
 # ponytail: reindexes the whole qmd index each save, fine while ai-memory is its only collection
 if command -v "$QMD_BIN" >/dev/null; then
-  { "$QMD_BIN" update && "$QMD_BIN" embed; } >/dev/null 2>&1 || log "qmd reindex failed, run: qmd update && qmd embed"
+  # A resumed session overwrites its note, and qmd keeps the old note's vectors until cleanup drops them
+  { "$QMD_BIN" update && "$QMD_BIN" embed && "$QMD_BIN" cleanup; } >/dev/null 2>&1 || log "qmd reindex failed, run: qmd update && qmd embed && qmd cleanup"
 fi

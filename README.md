@@ -11,7 +11,7 @@ See [SPEC.md](SPEC.md) for the design and every decision behind it
 Each save does two steps:
 
 1. **Write the note.** The summarizer model reads the session and writes `sessions/YYYY-MM-DD-<slug>.md` into the vault. The Markdown file is the memory, and it's what you read in Obsidian
-2. **Update the search index.** The same background job runs `qmd update && qmd embed`. [qmd](https://github.com/tobi/qmd) splits the new note into chunks and computes an embedding for each one on your machine, with no API calls
+2. **Update the search index.** The same background job runs `qmd update && qmd embed && qmd cleanup`. [qmd](https://github.com/tobi/qmd) splits the new note into chunks and computes an embedding for each one on your machine, with no API calls
 
 The embeddings don't live in Obsidian. qmd keeps them in its own index at `~/.cache/qmd/index.sqlite`, so the vault stays plain Markdown. If the index is lost or broken, `qmd update && qmd embed` rebuilds it from the notes
 

@@ -120,7 +120,7 @@ Rejected: asking for an API key in the wizard and storing it in ai-memory's conf
    - Summaries always bill the Claude subscription, never the API. Every credential that [outranks the `/login` session](https://code.claude.com/docs/en/authentication#authentication-precedence) is stripped from the call's environment: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_PROFILE`, `ANTHROPIC_FEDERATION_RULE_ID` and `CLAUDE_CODE_USE_BEDROCK/VERTEX/FOUNDRY`
    - Before summarizing, `claude auth status` runs under that same environment. Anything other than `claude.ai` or `oauth_token` (a `claude setup-token` subscription token), for example an `apiKeyHelper` in settings, makes the worker refuse and log why, so it never falls back to API billing
 5. The worker writes `sessions/YYYY-MM-DD-<slug>.md` atomically. A resumed session reuses its existing file name. If the summarizer fails, the existing note is kept
-6. The worker runs `qmd update && qmd embed`, so the note is searchable right away
+6. The worker runs `qmd update && qmd embed && qmd cleanup`, so the note is searchable right away
 7. Every outcome is logged to `~/.claude/ai-memory.log`
 
 OpenCode:

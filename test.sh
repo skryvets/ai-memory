@@ -186,6 +186,7 @@ for _ in $(seq 1 50); do [ -f "$SESSIONS/$(date +%F)-detached.md" ] && break; sl
 
 echo "test: saving reindexes qmd so new notes are searchable"
 grep -qx update "$WORK/qmd-calls" && grep -qx embed "$WORK/qmd-calls" || fail "qmd not reindexed after save"
+grep -qx cleanup "$WORK/qmd-calls" || fail "qmd orphaned embeddings not cleaned up after save"
 
 echo "test: manual /save-memory finds the transcript and saves short sessions"
 mkdir -p "$AI_MEMORY_CLAUDE_PROJECTS/-tmp-manual"
