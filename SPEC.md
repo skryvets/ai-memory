@@ -13,7 +13,7 @@ Context from a Claude Code session is lost when it ends. Built-in auto-memory is
 | 1 | One shared memory, not per project | Memory has to cross projects and folders |
 | 2 | Stored in `~/obsidian/Personal/ai-memory/`, a dedicated top-level folder | Plain files, no API or auth inside a hook. Kept apart from hand-written notes |
 | 3 | Save a summary plus a link to the raw transcript | Summaries are what gets recalled, and the transcript is there for digging |
-| 4 | Trigger on SessionEnd, every reason. Skip sessions with fewer than 4 user messages. No PreCompact | The JSONL keeps the full transcript after compaction, so a PreCompact save would just be a duplicate |
+| 4 | Trigger on SessionEnd, every reason. Skip sessions with fewer than 4 user messages unless they made a tool call. Skip unchanged sessions by `content_hash`. Failures send a macOS notification. No PreCompact | One prompt can drive a lot of work, and one session can end several times. The JSONL keeps the full transcript after compaction, so a PreCompact save would just be a duplicate |
 | 5 | Summary written by headless `claude -p`, detached from the hook | Hooks have no model, and SessionEnd hooks get a 1.5s budget |
 | 6 | Recall on demand with a `recall` skill, no SessionStart injection for now | Asking is fine, and loading everything every session would bloat context. Revisit later |
 | 7 | Installed globally in `~/.claude` | It should work wherever Claude starts |
