@@ -12,6 +12,7 @@ export AI_MEMORY_LOG="$WORK/hook.log"
 export AI_MEMORY_CLAUDE_BIN="$WORK/fake-claude"
 export AI_MEMORY_OPENCODE_BIN="$WORK/fake-opencode"
 export AI_MEMORY_QMD_BIN="$WORK/fake-qmd"
+export AI_MEMORY_OSASCRIPT_BIN="$WORK/fake-osascript"
 export AI_MEMORY_LAUNCHCTL="$WORK/fake-launchctl"
 export AI_MEMORY_CLAUDE_PROJECTS="$WORK/projects"
 SESSIONS="$AI_MEMORY_DIR/sessions"
@@ -68,9 +69,14 @@ case "$1 $2" in
 ```' '{type: "text", sessionID: "ses_summary", part: {type: "text", text: $t}}' ;;
 esac
 EOF
-printf '#!/usr/bin/env bash\necho "$*" >>"$(dirname "$0")/qmd-calls"\n' >"$AI_MEMORY_QMD_BIN"
+cat >"$AI_MEMORY_QMD_BIN" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$(dirname "$0")/qmd-calls"
+[ -z "${FAKE_QMD_FAIL:-}" ]
+EOF
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >>"$(dirname "$0")/notifications"\n' >"$AI_MEMORY_OSASCRIPT_BIN"
 printf '#!/usr/bin/env bash\necho "$*" >>"$(dirname "$0")/launchctl-calls"\n' >"$AI_MEMORY_LAUNCHCTL"
-chmod +x "$AI_MEMORY_OPENCODE_BIN" "$AI_MEMORY_QMD_BIN" "$AI_MEMORY_LAUNCHCTL"
+chmod +x "$AI_MEMORY_OPENCODE_BIN" "$AI_MEMORY_QMD_BIN" "$AI_MEMORY_OSASCRIPT_BIN" "$AI_MEMORY_LAUNCHCTL"
 
 fail() { echo "FAIL: $*" >&2; cat "$AI_MEMORY_LOG" >&2 2>/dev/null || true; exit 1; }
 
@@ -79,11 +85,11 @@ saved() {
 }
 
 make_transcript() {
-  local path="$1" n="$2"
+  local path="$1" n="$2" tools="${3:-tools}"
   : >"$path"
   for i in $(seq 1 "$n"); do
     jq -nc --arg c "question $i" '{type: "user", message: {role: "user", content: $c}}' >>"$path"
-    jq -nc --arg t "answer $i" '{type: "assistant", message: {model: "claude-sonnet-5-5", content: [{type: "text", text: $t}, {type: "tool_use", name: "Bash"}]}}' >>"$path"
+    jq -nc --arg t "answer $i" --arg tools "$tools" '{type: "assistant", message: {model: "claude-sonnet-5-5", content: ([{type: "text", text: $t}] + (if $tools == "tools" then [{type: "tool_use", name: "Bash"}] else [] end))}}' >>"$path"
   done
   jq -nc '{type: "user", isMeta: true, message: {content: "meta noise"}}' >>"$path"
   jq -nc '{type: "user", message: {content: "<command-name>/clear</command-name>"}}' >>"$path"
@@ -95,24 +101,30 @@ run_worker() {
 }
 
 make_opencode_export() {
-  local id="$1" n="$2" updated_ms="$3"
-  jq -n --arg id "$id" --argjson n "$n" --argjson u "$updated_ms" '{
+  local id="$1" n="$2" updated_ms="$3" tools="${4:-tools}"
+  jq -n --arg id "$id" --argjson n "$n" --argjson u "$updated_ms" --arg tools "$tools" '{
     info: {id: $id, model: {id: "x-ai/grok-4.7"}, time: {updated: $u}, location: {directory: "/tmp/oc-project"}},
     messages: ([range($n)] | map(
       {type: "user", text: "oc question \(.)"},
-      {type: "assistant", model: {id: "qwen/qwen3.8-27b"}, content: [
+      {type: "assistant", model: {id: "qwen/qwen3.8-27b"}, content: ([
         {type: "reasoning", text: "hidden reasoning"},
-        {type: "text", text: "oc answer \(.)"},
-        {type: "tool", name: "shell", state: {output: "tool noise"}}]},
+        {type: "text", text: "oc answer \(.)"}] +
+        (if $tools == "tools" then [{type: "tool", name: "shell", state: {output: "tool noise"}}] else [] end))},
       {type: "idle", outcome: "succeeded"}))
   }' >"$WORK/export-$id.json"
 }
 
-echo "test: short sessions are skipped"
-make_transcript "$WORK/short.jsonl" 3
+echo "test: short sessions without tool calls are skipped"
+make_transcript "$WORK/short.jsonl" 3 no-tools
 run_worker short-1 "$WORK/short.jsonl"
 [ ! -d "$SESSIONS" ] || [ -z "$(ls -A "$SESSIONS")" ] || fail "short session wrote a note"
-grep -q "skipped, 3 user messages" "$AI_MEMORY_LOG" || fail "skip not logged"
+grep -q "skipped, 3 user messages and 0 tool calls" "$AI_MEMORY_LOG" || fail "skip not logged"
+
+echo "test: tool calls without a human message are skipped"
+jq -nc '{type: "assistant", message: {content: [{type: "tool_use", name: "Bash"}]}}' >"$WORK/no-human.jsonl"
+run_worker no-human-1 "$WORK/no-human.jsonl"
+[ ! -d "$SESSIONS" ] || [ -z "$(ls -A "$SESSIONS")" ] || fail "session with no human message wrote a note"
+grep -q "\[no-human-1\] skipped, 0 user messages and 1 tool calls" "$AI_MEMORY_LOG" || fail "no-human skip not logged"
 
 echo "test: writes a note with frontmatter and body"
 make_transcript "$WORK/long.jsonl" 4
@@ -145,7 +157,8 @@ grep -q "Rejected: <an alternative considered> - <why not>" "$WORK/claude-args" 
 grep -q "sessions/<note-name>" "$WORK/claude-args" || fail "prompt lacks link to earlier session"
 
 echo "test: resumed session updates its note in place so links stay valid"
-FAKE_TITLE="Renamed After Resume" run_worker long-1 "$WORK/long.jsonl"
+make_transcript "$WORK/resumed.jsonl" 5
+FAKE_TITLE="Renamed After Resume" run_worker long-1 "$WORK/resumed.jsonl"
 [ "$(grep -lx "session_id: long-1" "$SESSIONS"/*.md | wc -l | tr -d ' ')" = 1 ] || fail "duplicate notes for one session"
 grep -qx "# Renamed After Resume" "$note" || fail "resumed note not updated in place"
 
@@ -160,9 +173,87 @@ FAKE_TITLE="No Model" run_worker nomodel-1 "$WORK/nomodel.jsonl"
 grep -qx "claude-opus-5-5" "$WORK/claude-args" || fail "fallback model not used"
 
 echo "test: failed summarizer keeps existing note and logs why"
-FAKE_MODE=fail run_worker long-2 "$WORK/long.jsonl" && fail "worker should fail on error output"
+rm -f "$WORK/notifications"
+FAKE_MODE=fail run_worker long-2 "$WORK/resumed.jsonl" && fail "worker should fail on error output"
 [ -f "$SESSIONS/$(date +%F)-another-session.md" ] || fail "existing note lost"
 grep -q "\[long-2\] summarizer returned no structured output.*Invalid API key" "$AI_MEMORY_LOG" || fail "failure not logged"
+
+echo "test: failed save sends one notification naming the session and reason"
+[ "$(grep -c '^AI memory save failed$' "$WORK/notifications")" = 1 ] || fail "expected one notification: $(cat "$WORK/notifications")"
+grep -q "^long-2: summarizer returned no structured output" "$WORK/notifications" || fail "notification lacks reason"
+
+echo "test: a successful save sends no notification"
+rm -f "$WORK/notifications"
+FAKE_TITLE="Quiet Success" run_worker notify-ok "$WORK/long.jsonl"
+[ ! -e "$WORK/notifications" ] || fail "success sent a notification"
+
+echo "test: failed qmd reindex keeps the note and notifies"
+FAKE_QMD_FAIL=1 FAKE_TITLE="Qmd Failure" run_worker qmd-fail "$WORK/long.jsonl" && fail "worker should fail when qmd fails"
+[ -f "$SESSIONS/$(date +%F)-qmd-failure.md" ] || fail "note lost when qmd failed"
+grep -q "^qmd-fail: qmd reindex failed" "$WORK/notifications" || fail "qmd failure not notified"
+
+echo "test: a broken notifier does not hide the save failure"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$WORK/broken-osascript"
+chmod +x "$WORK/broken-osascript"
+AI_MEMORY_OSASCRIPT_BIN="$WORK/broken-osascript" FAKE_MODE=fail run_worker notify-broken "$WORK/long.jsonl" && fail "worker should still fail"
+grep -q "\[notify-broken\] could not send failure notification" "$AI_MEMORY_LOG" || fail "notifier failure not logged"
+
+echo "test: missing transcript is quiet on auto save and notifies on forced save"
+rm -f "$WORK/notifications"
+run_worker missing-auto "$WORK/does-not-exist.jsonl" || fail "auto save should ignore a missing transcript"
+[ ! -e "$WORK/notifications" ] || fail "auto save notified about a missing transcript"
+"$HOOK" run claude-code force missing-force >>"$AI_MEMORY_LOG" 2>&1 && fail "forced save should fail without a transcript"
+grep -q "^missing-: no transcript" "$WORK/notifications" || fail "forced save did not notify"
+
+echo "test: short session with tool calls is saved"
+make_transcript "$WORK/short-tools.jsonl" 1
+FAKE_TITLE="Short With Tools" run_worker short-tools "$WORK/short-tools.jsonl"
+[ -f "$SESSIONS/$(date +%F)-short-with-tools.md" ] || fail "short session with tool calls not saved"
+
+echo "test: attachment messages are counted and reach the summary"
+{
+  jq -nc '{type: "user", message: {content: [{type: "image", source: {}}, {type: "text", text: "fix this screenshot"}]}}'
+  jq -nc '{type: "user", message: {content: [{type: "text", text: "<system-reminder>injected</system-reminder>"}, {type: "text", text: "and this one"}]}}'
+  jq -nc '{type: "user", message: {content: [{type: "image", source: {}}]}}'
+  jq -nc '{type: "user", message: {content: [{type: "text", text: "<system-reminder>only tags</system-reminder>"}]}}'
+  jq -nc '{type: "user", message: {content: [{type: "text", text: "plain block"}]}}'
+  jq -nc '{type: "user", message: {content: [{type: "tool_result", content: "tool noise"}, {type: "text", text: "tool sibling"}]}}'
+  jq -nc '{type: "assistant", message: {model: "claude-sonnet-5-5", content: [{type: "text", text: "done"}]}}'
+} >"$WORK/attachments.jsonl"
+FAKE_TITLE="Attachment Session" run_worker attach-1 "$WORK/attachments.jsonl"
+[ -f "$SESSIONS/$(date +%F)-attachment-session.md" ] || fail "4 messages with attachments were not counted"
+for text in "fix this screenshot" "and this one" "plain block" "\[image attachment\]"; do
+  grep -q "$text" "$WORK/claude-stdin" || fail "'$text' missing from summary input"
+done
+! grep -qE "injected|only tags|tool noise|tool sibling" "$WORK/claude-stdin" || fail "non-human text leaked into summary input"
+
+echo "test: unchanged session is not summarized again"
+rm -f "$WORK/claude-args"
+FAKE_TITLE="Must Not Run" run_worker attach-1 "$WORK/attachments.jsonl"
+[ ! -e "$WORK/claude-args" ] || fail "unchanged session was summarized again"
+grep -q "\[attach-1\] unchanged since last save" "$AI_MEMORY_LOG" || fail "unchanged skip not logged"
+
+echo "test: metadata lines do not count as a change"
+jq -nc '{type: "last-prompt", lastPrompt: "x"}' >>"$WORK/attachments.jsonl"
+FAKE_TITLE="Must Not Run" run_worker attach-1 "$WORK/attachments.jsonl"
+[ ! -e "$WORK/claude-args" ] || fail "metadata line triggered a new summary"
+
+echo "test: a new turn is summarized again"
+jq -nc '{type: "user", message: {content: "one more thing"}}' >>"$WORK/attachments.jsonl"
+FAKE_TITLE="After New Turn" run_worker attach-1 "$WORK/attachments.jsonl"
+grep -qx "# After New Turn" "$SESSIONS/$(date +%F)-attachment-session.md" || fail "new turn did not update the note"
+
+echo "test: forced save runs even when unchanged"
+rm -f "$WORK/claude-args"
+FAKE_TITLE="Forced Again" "$HOOK" run claude-code force attach-1 "$WORK/attachments.jsonl" /tmp/project >>"$AI_MEMORY_LOG" 2>&1
+[ -e "$WORK/claude-args" ] || fail "forced save skipped an unchanged session"
+
+echo "test: note without a content hash is summarized once"
+sed -i '' '/^content_hash: /d' "$SESSIONS/$(date +%F)-attachment-session.md"
+rm -f "$WORK/claude-args"
+FAKE_TITLE="Legacy Upgrade" run_worker attach-1 "$WORK/attachments.jsonl"
+[ -e "$WORK/claude-args" ] || fail "legacy note was not refreshed"
+grep -q "^content_hash: " "$SESSIONS/$(date +%F)-attachment-session.md" || fail "hash not added to legacy note"
 
 for method in api_key api_key_helper third_party none ""; do
   echo "test: refuses to summarize when auth is '$method'"
@@ -218,9 +309,12 @@ export AI_MEMORY_QUIET_SECONDS=1
 make_opencode_export oc-busy 4 $(( ($(date +%s) + 60) * 1000 ))
 FAKE_TITLE="Busy Session" "$HOOK" run opencode idle oc-busy >>"$AI_MEMORY_LOG" 2>&1
 [ ! -f "$SESSIONS/$(date +%F)-busy-session.md" ] || fail "saved a session that is still active"
-make_opencode_export oc-short 3 0
+make_opencode_export oc-short 3 0 no-tools
 FAKE_TITLE="Short OpenCode" "$HOOK" run opencode idle oc-short >>"$AI_MEMORY_LOG" 2>&1
 [ ! -f "$SESSIONS/$(date +%F)-short-opencode.md" ] || fail "saved a short opencode session"
+make_opencode_export oc-short-tools 1 0
+FAKE_TITLE="Short OpenCode Tools" "$HOOK" run opencode idle oc-short-tools >>"$AI_MEMORY_LOG" 2>&1
+[ -f "$SESSIONS/$(date +%F)-short-opencode-tools.md" ] || fail "short opencode session with tools not saved"
 make_opencode_export oc-quiet 4 0
 FAKE_TITLE="Quiet Session" "$HOOK" run opencode idle oc-quiet >>"$AI_MEMORY_LOG" 2>&1
 [ -f "$SESSIONS/$(date +%F)-quiet-session.md" ] || fail "quiet opencode session not saved"

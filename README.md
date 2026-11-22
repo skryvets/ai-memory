@@ -112,7 +112,7 @@ The OpenCode plugin test needs [Bun](https://bun.sh) and is skipped without it
 
 ## Troubleshooting
 
-- Every save logs to `~/.claude/ai-memory.log`: skipped sessions, saved notes and errors
+- Every save logs to `~/.claude/ai-memory.log`: skipped sessions, saved notes and errors. A failed save also sends a macOS notification
   - "refusing to summarize" means Claude Code isn't on a subscription login. Run `claude /login`, or switch to the OpenCode summarizer
   - "summarizer returned no structured output" with the OpenCode summarizer usually means the model didn't reply with JSON. Pick a stronger `AI_MEMORY_SUMMARY_MODEL` and re-run `install.sh`
 - The qmd server logs to `~/Library/Logs/ai-memory.qmd.log`. Restart it with `launchctl kickstart -k gui/$(id -u)/ai-memory.qmd`
