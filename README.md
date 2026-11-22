@@ -92,7 +92,7 @@ A person can run `./setup.sh`. An agent can't answer its questions, so it runs t
    - With Claude Code: `claude mcp get qmd` shows `Connected`
    - With OpenCode: `jq .mcp.qmd ~/.config/opencode/opencode.json*` shows the `http://localhost:8181/mcp` entry
 9. If OpenCode is installed, ask the user to run `opencode service restart` when no OpenCode session is busy, so it loads the plugin
-10. Tell the user to restart open agent sessions, then try it: run `/save-memory`, or have a session of 4 or more messages and exit it (Claude Code) or leave it quiet for 10 minutes (OpenCode). A note appears in `<memory folder>/sessions/`, and `/recall <topic>` finds it
+10. Tell the user to restart open agent sessions, then try it: run `/save-memory`, or have a session that used a tool or has 4 or more messages and exit it (Claude Code) or leave it quiet for 10 minutes (OpenCode). A note appears in `<memory folder>/sessions/`, and `/recall <topic>` finds it
 
 ## Update
 
@@ -101,6 +101,61 @@ cd ~/Code/ai-memory && git pull && ./install.sh
 ```
 
 Then run `opencode service restart` if you use OpenCode
+
+## T3 Code
+
+Settling a Claude thread in [T3 Code](https://github.com/pingdotgg/t3code) ends its Claude session, which fires the `SessionEnd` hook and saves the thread to memory. There's no separate settle hook to configure, and no need to run `/save-memory` before settling
+
+Older versions of the hook skipped any session with fewer than 4 user messages, even when one prompt led to a lot of tool work, and they didn't count messages with attachments. Those threads settled without a note. Updating fixes new threads, and the steps below backfill the old ones
+
+This only covers Claude threads. Codex threads don't fire this hook, so they aren't saved
+
+### Instructions for an AI agent fixing T3 Code memory
+
+Run these steps in order and stop to report if one fails:
+
+1. Update: `cd ~/Code/ai-memory && git switch main && git pull --ff-only && ./install.sh`
+2. Verify:
+   - `./test.sh` ends with `all tests passed`
+   - `jq -r '.hooks.SessionEnd[].hooks[].command' ~/.claude/settings.json` lists `ai-memory-save.sh`. If not, Claude Code was left out of `AI_MEMORY_AGENTS`. Ask the user before re-running `install.sh` with it added
+   - `ls ~/.t3/userdata/statev2.sqlite` finds T3 Code's database
+3. List settled Claude threads that have a transcript but no note. This only reads T3 Code's database, which is internal and was checked against T3 Code 0.1.11. If the query fails on a newer version, stop and report the error instead of guessing at the schema
+
+   ```sh
+   ( [ ! -f ~/.config/ai-memory/env ] || . ~/.config/ai-memory/env
+     AI_MEMORY_DIR="${AI_MEMORY_DIR:-$HOME/obsidian/Personal/ai-memory}" python3 - <<'EOF'
+   import glob, json, os, re, sqlite3
+   home = os.path.expanduser("~")
+   db = sqlite3.connect(f"file:{home}/.t3/userdata/statev2.sqlite?mode=ro", uri=True)
+   state = {}
+   for thread, event in db.execute("select stream_id, event_type from orchestration_events where event_type in ('thread.settled', 'thread.unsettled') order by sequence"):
+       state[thread] = event
+   saved = set()
+   for note in glob.glob(os.environ["AI_MEMORY_DIR"] + "/sessions/*.md"):
+       match = re.search(r"^session_id: (.+)$", open(note, errors="ignore").read(1000), re.M)
+       if match:
+           saved.add(match[1].strip())
+   for thread, payload in db.execute("select thread_id, payload_json from orchestration_v2_projection_provider_threads where provider = 'claudeAgent'"):
+       session = (json.loads(payload).get("nativeThreadRef") or {}).get("nativeId")
+       if state.get(thread) == "thread.settled" and session and session not in saved and glob.glob(f"{home}/.claude/projects/*/{session}.jsonl"):
+           print(session)
+   EOF
+   )
+   ```
+
+4. Backfill each printed session ID, one at a time so qmd reindexes don't collide. This uses the summarizer configured on this machine
+
+   ```sh
+   for id in <session IDs from step 3>; do
+     ~/Code/ai-memory/hooks/ai-memory-save.sh run claude-code force "$id"
+     echo "exit $? $id"
+   done
+   ```
+
+5. Run step 3 again. It should print nothing. Report how many notes were saved and any session that failed, with its error from `~/.claude/ai-memory.log`
+6. Ask the user to settle a real thread and confirm that its note appears in `<memory folder>/sessions/` within about a minute. A failed save sends a macOS notification
+
+Backfilled notes carry the date of the backfill, not the date of the work
 
 ## Test
 
